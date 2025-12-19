@@ -16,43 +16,43 @@ CNPS_TREATMENT est un pipeline R/Python pour traiter, auditer et calculer des in
 ## Structure importante
 
 CNPS_TREATMENT/
-│
 ├── config/
-│   ├── config.R                 # CONFIGURATION CENTRALE
-│   ├── paths.R                  # chemins seulement
-│   └── dictionaries.R           # dictionnaires de variables
+│   ├── config.R                   # Central configuration (options, validation)
+│   ├── paths.R                    # All project paths (no hard-coded paths)
+│   └── dictionaries.R             # Variable dictionaries & type mappings
 │
 ├── data/
 │   ├── raw/
-│   │   └── excel/               # fichiers Excel entrants
+│   │   └── excel/                 # Incoming Excel files (expected: MM_YYYY.xlsx)
 │   │
 │   ├── processed/
-│   │   ├── dta/                 # fichiers .dta après conversion + typage
-│   │   └── registry/            # suivi des fichiers déjà traités
-│   │       └── processed_index.csv
+│   │   ├── dta/                   # .dta files after Excel conversion & typing
+│   │   └── registry/
+│   │       └── processed_index.csv # Incremental processing registry
 │   │
 │   ├── cleaned/
-│   │   ├── monthly/             # concat mensuel intermédiaire
-│   │   └── final/               # base finale nettoyée
+│   │   ├── monthly/               # Intermediate monthly datasets
+│   │   └── final/                 # Final cleaned & consolidated dataset
 │   │
-│   └── archive/                 # anciens fichiers remplacés
+│   └── archive/                   # Archived / replaced raw files
 │
 ├── output/
-│   ├── inconsistencies/
-│   └── results/
+│   ├── inconsistencies/           # Data quality audit reports (Excel)
+│   └── results/                   # Final indicators & analytical outputs
 │
 ├── scripts/
-│   ├── 00_init_project.R        # initialise dossiers + registry
-│   ├── 01_from_excel_to_dta.R
-│   ├── inconsistency_check.R
-│   ├── 02_column_types_matching.R
-│   ├── 03_add_mois_annee.R
-│   ├── 04_concat_databases.R
-│   ├── data_cleaning.R
-│   ├── merge_sector_cod.R
-│   └── 05_calc_indicators.R
+│   ├── 00_init_project.R          # Initialize folders & registries
+│   ├── 01_from_excel_to_dta.R     # Excel → Stata (.dta) conversion
+│   ├── inconsistency_check.R      # Incremental data quality audit
+│   ├── 02_column_types_matching.R # Column type harmonization
+│   ├── 03_add_mois_annee.R        # Add MOIS / ANNEE from filenames
+│   ├── 04_concat_databases.R      # Concatenate monthly datasets
+│   ├── data_cleaning.R            # Salary & duration cleaning rules
+│   ├── merge_sector_cod.R         # Merge sector classification data
+│   └── 05_calc_indicators.R       # Salary indicators & Excel output
 │
-└── run_pipeline.R               # lance le process complet
+└── run_pipeline.R                 # Main pipeline launcher
+
 
 - `config/`
   - `config.R` : paramètres globaux, fonctions utilitaires et validation de la config.
