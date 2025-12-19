@@ -15,6 +15,45 @@ CNPS_TREATMENT est un pipeline R/Python pour traiter, auditer et calculer des in
 
 ## Structure importante
 
+CNPS_TREATMENT/
+│
+├── config/
+│   ├── config.R                 # CONFIGURATION CENTRALE
+│   ├── paths.R                  # chemins seulement
+│   └── dictionaries.R           # dictionnaires de variables
+│
+├── data/
+│   ├── raw/
+│   │   └── excel/               # fichiers Excel entrants
+│   │
+│   ├── processed/
+│   │   ├── dta/                 # fichiers .dta après conversion + typage
+│   │   └── registry/            # suivi des fichiers déjà traités
+│   │       └── processed_index.csv
+│   │
+│   ├── cleaned/
+│   │   ├── monthly/             # concat mensuel intermédiaire
+│   │   └── final/               # base finale nettoyée
+│   │
+│   └── archive/                 # anciens fichiers remplacés
+│
+├── output/
+│   ├── inconsistencies/
+│   └── results/
+│
+├── scripts/
+│   ├── 00_init_project.R        # initialise dossiers + registry
+│   ├── 01_from_excel_to_dta.R
+│   ├── inconsistency_check.R
+│   ├── 02_column_types_matching.R
+│   ├── 03_add_mois_annee.R
+│   ├── 04_concat_databases.R
+│   ├── data_cleaning.R
+│   ├── merge_sector_cod.R
+│   └── 05_calc_indicators.R
+│
+└── run_pipeline.R               # lance le process complet
+
 - `config/`
   - `config.R` : paramètres globaux, fonctions utilitaires et validation de la config.
   - `paths.R`  : chemins centralisés (`PATHS`) et fichiers externes (`EXTERNAL_FILES`).
@@ -26,6 +65,7 @@ CNPS_TREATMENT est un pipeline R/Python pour traiter, auditer et calculer des in
 - `output/` : `inconsistencies/` (rapports d'audit) et `results/` (résultats indicateurs).
 - `data/processed/registry/processed_index.csv` : registry qui trace le statut des fichiers.
 
+---
 
 ## Flux principal (expliqué)
 
