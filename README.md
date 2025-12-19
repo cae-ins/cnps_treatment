@@ -15,6 +15,7 @@ CNPS_TREATMENT est un pipeline R/Python pour traiter, auditer et calculer des in
 
 ## Structure importante
 
+```
 CNPS_TREATMENT/
 ├── config/
 │   ├── config.R                   # Central configuration (options, validation)
@@ -52,7 +53,7 @@ CNPS_TREATMENT/
 │   └── 05_calc_indicators.R       # Salary indicators & Excel output
 │
 └── run_pipeline.R                 # Main pipeline launcher
-
+```
 
 - `config/`
   - `config.R` : paramètres globaux, fonctions utilitaires et validation de la config.
