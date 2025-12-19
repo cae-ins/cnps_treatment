@@ -12,7 +12,6 @@ CNPS_TREATMENT est un pipeline R/Python pour traiter, auditer et calculer des in
 - Python (pour la conversion Excel → DTA) — le script Python appelé se trouve dans `scripts/01_excel_to_dta.py`.
 - OS: les chemins par défaut utilisent des chemins Windows (modifiable dans `config/paths.R`).
 
----
 
 ## Structure importante
 
@@ -27,7 +26,6 @@ CNPS_TREATMENT est un pipeline R/Python pour traiter, auditer et calculer des in
 - `output/` : `inconsistencies/` (rapports d'audit) et `results/` (résultats indicateurs).
 - `data/processed/registry/processed_index.csv` : registry qui trace le statut des fichiers.
 
----
 
 ## Flux principal (expliqué)
 
@@ -46,7 +44,6 @@ Le fichier `run_pipeline.R` orchestre ces étapes (par défaut `run_pipeline()` 
 
 Chaque étape met à jour le `registry` pour tracer le traitement des fichiers (hash, status, date, etc.).
 
----
 
 ## Schéma du process global (inputs → scripts → outputs)
 
@@ -141,7 +138,6 @@ python scripts/01_excel_to_dta.py "C:/chemin/vers/PROJECT_ROOT" --force
 
 > Remarque: `01_from_excel_to_dta.R` est un wrapper qui exécute le script Python via `system2()`.
 
----
 
 ## Configuration
 
@@ -156,7 +152,7 @@ python scripts/01_excel_to_dta.py "C:/chemin/vers/PROJECT_ROOT" --force
 - Le `registry` (fichier CSV `data/processed/registry/processed_index.csv`) contient : nom de fichier source, hash, date traitement, étape complétée, status, période, taille etc.
 - Fonctions utiles : `get_files_to_process()` (liste nouveaux / modifiés / à jour), `update_registry()`.
 
----
+
 
 ## Dépannage (troubleshooting)
 
@@ -165,7 +161,6 @@ python scripts/01_excel_to_dta.py "C:/chemin/vers/PROJECT_ROOT" --force
 - Fichiers manquants référencés dans `EXTERNAL_FILES`: corriger les chemins ou placer les fichiers attendus.
 - Pour forcer reprise: `run_pipeline(force_reprocess = TRUE)` ou supprimer l'entrée correspondante du registry.
 
----
 
 ## Bonnes pratiques
 
@@ -173,7 +168,7 @@ python scripts/01_excel_to_dta.py "C:/chemin/vers/PROJECT_ROOT" --force
 - Respecter le nommage des fichiers d'entrée (`MM_YYYY.xlsx`), utilisé pour extraire `MOIS`/`ANNEE`.
 - Exécuter les contrôles d'incohérence (`run_inconsistency_check()`) avant et après le typage.
 
----
+
 
 _Petit rappel: adaptez `PROJECT_ROOT` dans `config/paths.R` si vous bougez le projet vers un autre chemin._
 
