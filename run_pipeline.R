@@ -29,18 +29,17 @@ source(file.path(PATHS$scripts, "05_calc_indicators.R"))
 # ------------------------------------------------------------
 # FONCTION PRINCIPALE DU PIPELINE
 # ------------------------------------------------------------
-run_pipeline <- function(steps = "all", 
-                          force_reprocess = FALSE,
-                          run_checks = TRUE) {
-  
+run_pipeline <- function(steps = "all",
+                         force_reprocess = FALSE,
+                         run_checks = TRUE) {
   start_time <- Sys.time()
-  
+
   cat("\n")
   cat(strrep("=", 70), "\n")
   cat("  PIPELINE CNPS - TRAITEMENT DES DONNÉES SALARIALES\n")
   cat("  Démarré: ", as.character(start_time), "\n")
   cat(strrep("=", 70), "\n")
-  
+
   # Définir les étapes
   all_steps <- c(
     "init",
@@ -54,15 +53,15 @@ run_pipeline <- function(steps = "all",
     "merge_sectors",
     "indicators"
   )
-  
+
   if (steps == "all") {
     steps_to_run <- all_steps
   } else {
     steps_to_run <- intersect(steps, all_steps)
   }
-  
+
   results <- list()
-  
+
   # ------------------------------------------------------------
   # ÉTAPE 0: INITIALISATION
   # ------------------------------------------------------------
@@ -71,7 +70,7 @@ run_pipeline <- function(steps = "all",
     init_directories()
     init_registry(force_reset = force_reprocess)
   }
-  
+
   # ------------------------------------------------------------
   # ÉTAPE 1: EXCEL → DTA
   # ------------------------------------------------------------
@@ -79,7 +78,7 @@ run_pipeline <- function(steps = "all",
     cat("\n[1/9] CONVERSION EXCEL → STATA\n")
     results$excel_to_dta <- convert_excel_to_dta(force = force_reprocess)
   }
-  
+
   # ------------------------------------------------------------
   # ÉTAPE 2: CONTRÔLE D'INCOHÉRENCES (PRÉ-TYPAGE)
   # ------------------------------------------------------------
@@ -89,7 +88,7 @@ run_pipeline <- function(steps = "all",
       suffix = paste0("pre_typing_", get_timestamp())
     )
   }
-  
+
   # ------------------------------------------------------------
   # ÉTAPE 3: HARMONISATION DES TYPES
   # ------------------------------------------------------------
@@ -97,7 +96,7 @@ run_pipeline <- function(steps = "all",
     cat("\n[3/9] HARMONISATION DES TYPES DE COLONNES\n")
     results$types_matching <- match_column_types()
   }
-  
+
   # ------------------------------------------------------------
   # ÉTAPE 4: CONTRÔLE D'INCOHÉRENCES (POST-TYPAGE)
   # ------------------------------------------------------------
@@ -107,7 +106,7 @@ run_pipeline <- function(steps = "all",
       suffix = paste0("post_typing_", get_timestamp())
     )
   }
-  
+
   # ------------------------------------------------------------
   # ÉTAPE 5: AJOUT MOIS/ANNEE
   # ------------------------------------------------------------
@@ -115,7 +114,7 @@ run_pipeline <- function(steps = "all",
     cat("\n[5/9] AJOUT DES COLONNES MOIS/ANNEE\n")
     results$add_mois_annee <- add_mois_annee()
   }
-  
+
   # ------------------------------------------------------------
   # ÉTAPE 6: CONCATÉNATION
   # ------------------------------------------------------------
@@ -123,7 +122,7 @@ run_pipeline <- function(steps = "all",
     cat("\n[6/9] CONCATÉNATION DES BASES\n")
     results$concat <- concat_databases(incremental = !force_reprocess)
   }
-  
+
   # ------------------------------------------------------------
   # ÉTAPE 7: NETTOYAGE
   # ------------------------------------------------------------
@@ -131,7 +130,7 @@ run_pipeline <- function(steps = "all",
     cat("\n[7/9] NETTOYAGE DES DONNÉES\n")
     results$cleaning <- clean_data()
   }
-  
+
   # ------------------------------------------------------------
   # ÉTAPE 8: FUSION CODES SECTEURS
   # ------------------------------------------------------------
@@ -139,7 +138,7 @@ run_pipeline <- function(steps = "all",
     cat("\n[8/9] FUSION AVEC LES CODES SECTEURS\n")
     results$merge_sectors <- merge_sector_codes()
   }
-  
+
   # ------------------------------------------------------------
   # ÉTAPE 9: CALCUL DES INDICATEURS
   # ------------------------------------------------------------
@@ -147,20 +146,20 @@ run_pipeline <- function(steps = "all",
     cat("\n[9/9] CALCUL DES INDICATEURS\n")
     results$indicators <- calculate_indicators()
   }
-  
+
   # ------------------------------------------------------------
   # RÉSUMÉ FINAL
   # ------------------------------------------------------------
   end_time <- Sys.time()
   duration <- difftime(end_time, start_time, units = "mins")
-  
+
   cat("\n")
   cat(strrep("=", 70), "\n")
   cat("  PIPELINE TERMINÉ\n")
   cat("  Durée: ", round(duration, 2), " minutes\n")
   cat("  Terminé: ", as.character(end_time), "\n")
   cat(strrep("=", 70), "\n")
-  
+
   # Afficher les fichiers de sortie
   if (!is.null(results$indicators$output_file)) {
     cat("\nFichiers de sortie:\n")
@@ -169,7 +168,7 @@ run_pipeline <- function(steps = "all",
   if (!is.null(results$merge_sectors$output_file)) {
     cat("  Base finale: ", results$merge_sectors$output_file, "\n")
   }
-  
+
   return(invisible(results))
 }
 
@@ -178,19 +177,19 @@ run_pipeline <- function(steps = "all",
 # ------------------------------------------------------------
 run_incremental <- function() {
   cat("\n=== MODE INCRÉMENTAL ===\n")
-  
+
   # Vérifier les nouveaux fichiers
   files_status <- get_files_to_process()
-  
+
   cat("Nouveaux fichiers: ", length(files_status$new), "\n")
   cat("Fichiers modifiés: ", length(files_status$modified), "\n")
   cat("Fichiers à jour:   ", length(files_status$up_to_date), "\n")
-  
+
   if (length(files_status$new) + length(files_status$modified) == 0) {
     cat("\nAucune mise à jour nécessaire.\n")
     return(invisible(NULL))
   }
-  
+
   # Lancer le pipeline
   run_pipeline(force_reprocess = FALSE, run_checks = FALSE)
 }
