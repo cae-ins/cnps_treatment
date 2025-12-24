@@ -1,0 +1,23 @@
+=== RAPPORT DE FUSION DES BASES DE RÉFÉRENCE ===
+Date:  2025-12-24 16:51:36.486944 
+
+FICHIER SOURCE:
+  Observations:  2373369 
+  Variables initiales:  42 
+
+FICHIER FINAL:
+  Observations:  2373369 
+  Variables finales:  43 
+  Fichier:  C:/Users/e_koffie/Documents/Salaires/CNPS_TREATMENT_PROJECT/data/cleaned/final/data_cnps_final_01_2024-02_2024_20251224_165123.dta 
+
+DÉTAIL DES FUSIONS:
+------------------------------------------------------------ 
+
+Secteurs d'activité [EXACT]:
+  Status:  completed 
+  Matched:  1939290  ( 81.7 %)
+  Non matched:  434079 
+
+
+NOUVELLES VARIABLES AJOUTÉES ( 1 ):
+  -  SECTEUR_ACTIVITE_COD 
