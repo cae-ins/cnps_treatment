@@ -1,0 +1,79 @@
+Chemins chargés depuis paths.R
+Dictionnaires chargés depuis dictionaries.R
+  - 47 types de colonnes définis
+  - 12 groupes statistiques définis
+  - 17 classes d'âge détaillées
+  - 4 classes d'âge réduites
+  - 10 classes d'effectif détaillées
+  - 4 classes d'effectif réduites
+Configuration des merges chargée depuis merge_configs.R
+  - 1 merges configurés
+  - 1 merges exacts
+  - 0 merges fuzzy
+  - 1 merges activés
+Dimensions statistiques chargées depuis stat_dimensions.R
+Définitions statistiques chargées depuis stat_definitions.R
+Spécifications des modèles chargées depuis model_specs.R
+Estimateurs chargés depuis estimators.R
+Règles de validation chargées depuis validation_rules.R
+Configuration CNPS Pipeline chargée
+Gestionnaire de sessions chargé
+Registre des modèles chargé
+Wrapper d'ingestion R chargé
+
+Attachement du package : ‘dplyr’
+
+Les objets suivants sont masqués depuis ‘package:stats’:
+
+    filter, lag
+
+Les objets suivants sont masqués depuis ‘package:base’:
+
+    intersect, setdiff, setequal, union
+
+
+Attachement du package : ‘lubridate’
+
+Les objets suivants sont masqués depuis ‘package:base’:
+
+    date, intersect, setdiff, union
+
+Module de matching des types chargé
+Module d'ajout mois/année chargé
+Module de nettoyage et création des variables chargé
+Module de création base individuelle chargé
+Module de création base entreprise-temps chargé
+Module de création base analytique chargé
+
+Attachement du package : ‘purrr’
+
+L'objet suivant est masqué depuis ‘package:jsonlite’:
+
+    flatten
+
+Module de concaténation chargé
+
+Attachement du package : ‘stringdist’
+
+L'objet suivant est masqué depuis ‘package:tidyr’:
+
+    extract
+
+Module de fusion des références chargé (exact + fuzzy)
+Module de contrôle d'incohérences chargé
+Type 'citation("pROC")' for a citation.
+
+Attachement du package : ‘pROC’
+
+Les objets suivants sont masqués depuis ‘package:stats’:
+
+    cov, smooth, var
+
+Module de diagnostics des modèles chargé
+Module de validation des estimations chargé
+Module de modélisation déclaration chargé
+Module d'imputation entreprise chargé
+Module de modélisation individuelle chargé
+Module d'imputation individuelle chargé
+Module d'estimation pondérée chargé
+Module de calcul des indicateurs chargé
