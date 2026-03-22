@@ -3,7 +3,7 @@
 ## Pipeline de Traitement des Données Salariales CNPS
 
 **Version :** 1.0.0  
-**Auteur :** Direction des Statistiques - CNPS Côte d'Ivoire  
+**Auteur :** Unité Statistiques - CAE / ANSTAT - CNPS Côte d'Ivoire  
 **Date :** 2025  
 
 ---
@@ -981,15 +981,5 @@ Avant de soumettre une modification :
 ### Contact
 
 Pour toute question ou contribution :
-- **Email** : e_koffie@cnps.ci
-- **Direction** : Direction des Statistiques - CNPS Côte d'Ivoire
-
----
-
-## Licence
-
-Ce projet est la propriété de la CNPS Côte d'Ivoire. Tous droits réservés.
-
----
-
-*Dernière mise à jour : Janvier 2025*
+- **Email** : e.koffie@stat.plan.gouv.ci
+- **Direction** :  Unité Statistiques - CAE / ANSTAT - CNPS Côte d'Ivoire
