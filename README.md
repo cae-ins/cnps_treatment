@@ -41,6 +41,7 @@ pip install -e .
 | loguru | Logging structure |
 | joblib | Parallelisation |
 | xlsxwriter | Export Excel formate |
+| minio | Synchronisation des donnees avec le stockage objet MinIO |
 
 ## Configuration
 
@@ -76,6 +77,45 @@ cleaning:
   winsor_lower: 0.01         # Winsorisation (percentiles)
   winsor_upper: 0.99
 ```
+
+## Stockage objet MinIO
+
+Les fichiers de donnees (Excel bruts, Parquet nettoye) ne sont **pas** versionnes dans Git : ils sont trop volumineux (plusieurs Go) et vivent a la place sur un serveur **MinIO** interne. Le code, lui, est le seul element qui transite par GitHub — ce qui permet de le recuperer facilement sur n'importe quelle machine (y compris un serveur Jupyter distant plus puissant) sans avoir a deplacer les donnees.
+
+### Fonctionnement
+
+Le pipeline se synchronise automatiquement avec MinIO a deux moments precis :
+
+| Etape | Module | Sens | Description |
+|-------|--------|------|-------------|
+| Avant `INGEST` | `src/cnps/ingestion/excel_reader.py` | MinIO -> local | Telecharge les fichiers Excel manquants ou modifies depuis le bucket vers `data/raw/` |
+| Apres `CLEAN` | `src/cnps/preparation/cleaner.py` | local -> MinIO | Envoie `data/cleaned/cnps_cleaned.parquet` vers le bucket |
+
+Cette logique est centralisee dans `src/cnps/storage/minio_client.py` (fonctions `download_raw_data` et `upload_cleaned_data`). Si le serveur MinIO n'est pas joignable (hors du reseau interne, VPN non connecte, etc.), le pipeline **n'echoue pas** : il affiche un avertissement dans les logs et continue avec les fichiers locaux deja presents.
+
+### Configuration
+
+Les parametres de connexion (adresse du serveur, bucket, prefixes) sont dans `config/settings.yaml`, section `minio` :
+
+```yaml
+minio:
+  endpoint: "192.168.1.230:31157"
+  bucket: "admindataanstat"
+  raw_prefix: "CNPS/raw_data/"
+  cleaned_prefix: "CNPS/cleaned_data/"
+  secure: false
+```
+
+Les **identifiants** (access key / secret key) ne sont volontairement **jamais** places dans ce fichier versionne. Ils doivent etre definis via des variables d'environnement avant de lancer le pipeline :
+
+```bash
+export MINIO_ACCESS_KEY="votre_access_key"
+export MINIO_SECRET_KEY="votre_secret_key"
+```
+
+Sans ces variables, le client utilise `minioadmin` / `minioadmin` par defaut.
+
+> Le serveur MinIO tourne sur le reseau interne (`192.168.1.230`) : il faut etre connecte a ce reseau (ou au VPN correspondant) pour que la synchronisation fonctionne. Sur le serveur Jupyter distant, s'assurer que les variables d'environnement `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` y sont aussi definies.
 
 ## Utilisation
 
@@ -114,6 +154,12 @@ python run.py model
 # Estimation et export Excel
 python run.py estimate
 
+# Audit qualite des donnees (rapport Excel avec 6 controles)
+python run.py audit
+
+# Audit sur un dossier specifique avec variables personnalisees
+python run.py audit --input data/cleaned --salary-var SALAIRE_BRUT_MENS --id-var ID_INDIV
+
 # Validation (donnees + modeles + resultats)
 python run.py validate
 
@@ -149,8 +195,14 @@ python run.py reset stage CLEAN --dry-run # Apercu sans suppression
 | `origin` | `data/raw/`, code source, config | `data/processed/`, `data/cleaned/`, `data/output/`, `models/`, `logs/`, `sessions/` |
 | `INGEST` | + parquets ingeres | cleaned, modeles, output |
 | `CLEAN` | + base nettoyee | bases structurees, modeles, output |
+| `INDIVIDUAL_BASE` | + base individuelle | firm_base, analytical_base, modeles, output |
+| `FIRM_BASE` | + panel entreprise-mois | analytical_base, modeles, output |
 | `ANALYTICAL_BASE` | + toutes les bases structurees | modeles, poids, output |
-| `WEIGHTING` | + modeles et poids | estimation, export |
+| `DECLARATION_MODEL` | + modele de propension | modele d'imputation, estimation, export |
+| `IMPUTATION` | + modele d'imputation | poids finaux, estimation, export |
+| `WEIGHTING` | + poids finaux (`W_FINAL`) | estimation, export |
+
+> ⚠️ **Incoherence connue** : `reset.py` cible des fichiers `firm_base_propensity.parquet` et `analytical_base_weighted.parquet` pour les stages `DECLARATION_MODEL` et `WEIGHTING`. Ces fichiers ne sont **jamais crees** par le pipeline reel : `declaration_model.py` et `weighting.py` ecrivent leurs resultats **directement dans** `firm_base.parquet` et `analytical_base.parquet` (colonnes ajoutees en place). Consequence : `python run.py reset stage DECLARATION_MODEL` et `reset stage WEIGHTING` ne suppriment pas reellement les colonnes `W_JT`/`P_HAT_JT`/`W_FINAL` deja calculees — seuls les `.pkl` de `models/` sont retires. A corriger dans `reset.py` avant de se fier a ces deux niveaux de reset.
 
 ### Stages du pipeline
 
@@ -261,7 +313,9 @@ CNPS_TREATMENT_V2/
 |   |-- diagnostics/
 |   |   |-- validation.py        # Controles qualite
 |   |-- export/
-|       |-- excel_export.py      # Export Excel formate
+|   |   |-- excel_export.py      # Export Excel formate
+|   |-- storage/
+|       |-- minio_client.py      # Synchronisation avec MinIO
 |-- data/
 |   |-- raw/                   # Fichiers Excel source
 |   |-- processed/             # Parquet intermediaires
