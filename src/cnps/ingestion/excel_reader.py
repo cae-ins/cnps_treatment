@@ -30,6 +30,7 @@ from joblib import Parallel, delayed
 from loguru import logger
 
 from cnps.config import PipelineConfig
+from cnps.storage import download_raw_data
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +215,13 @@ def ingest(cfg: PipelineConfig) -> list[dict]:
     raw_dir = cfg.paths.raw_data
     out_dir = cfg.paths.processed_data
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        download_raw_data(cfg.minio, raw_dir)
+    except Exception as exc:
+        logger.warning(
+            "MinIO sync failed, falling back to local files in {}: {}", raw_dir, exc,
+        )
 
     pattern = cfg.ingestion.file_pattern
     files = sorted(raw_dir.glob(pattern))
