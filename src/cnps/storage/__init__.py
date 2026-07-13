@@ -1,4 +1,4 @@
-"""Object storage integration (MinIO) for the CNPS pipeline."""
+"""Integration avec le stockage objet (MinIO) pour le pipeline CNPS."""
 
 from cnps.storage.minio_client import download_raw_data, upload_cleaned_data
 

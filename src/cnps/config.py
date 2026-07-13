@@ -67,11 +67,12 @@ class EstimationConfig:
 
 @dataclass(frozen=True)
 class MinioConfig:
-    """Connection settings for the MinIO object storage server.
+    """Parametres de connexion au serveur de stockage objet MinIO.
 
-    Credentials are never read from YAML: they come from the
-    ``MINIO_ACCESS_KEY`` / ``MINIO_SECRET_KEY`` environment variables so
-    they can differ per machine and stay out of version control.
+    Les identifiants ne sont jamais lus depuis le YAML : ils viennent des
+    variables d'environnement ``MINIO_ACCESS_KEY`` / ``MINIO_SECRET_KEY``
+    afin de pouvoir differer selon la machine et de rester hors du
+    controle de version.
     """
     endpoint: str
     bucket: str

@@ -1,13 +1,14 @@
 """
-MinIO object storage client for the CNPS Treatment Pipeline.
+Client de stockage objet MinIO pour le pipeline de traitement CNPS.
 
-Handles synchronising raw Excel declarations from the MinIO bucket down to
-the local ``data/raw`` folder before ingestion, and uploading the cleaned
-Parquet output back up after the cleaning stage.
+Gere la synchronisation des declarations Excel brutes depuis le bucket MinIO
+vers le dossier local ``data/raw`` avant l'ingestion, ainsi que l'envoi du
+fichier Parquet nettoye vers MinIO apres l'etape de nettoyage.
 
-Credentials are read from ``MINIO_ACCESS_KEY`` / ``MINIO_SECRET_KEY``
-environment variables (see :class:`cnps.config.MinioConfig`); connection
-parameters (endpoint, bucket, prefixes) come from ``settings.yaml``.
+Les identifiants sont lus depuis les variables d'environnement
+``MINIO_ACCESS_KEY`` / ``MINIO_SECRET_KEY`` (voir :class:`cnps.config.MinioConfig`) ;
+les parametres de connexion (endpoint, bucket, prefixes) viennent de
+``settings.yaml``.
 """
 
 from __future__ import annotations
@@ -31,22 +32,24 @@ def _client(cfg: MinioConfig) -> Minio:
 
 def download_raw_data(cfg: MinioConfig, dest_dir: Path) -> list[Path]:
     """
-    Download every object under ``raw_prefix`` into *dest_dir*.
+    Telecharge tous les objets sous ``raw_prefix`` vers *dest_dir*.
 
-    Objects already present locally with a matching size are skipped, so
-    repeated calls only fetch new or changed files.
+    Les objets deja presents localement avec une taille identique sont
+    ignores : les appels repetes ne recuperent donc que les fichiers
+    nouveaux ou modifies.
 
     Parameters
     ----------
     cfg : MinioConfig
-        MinIO connection settings.
+        Parametres de connexion MinIO.
     dest_dir : Path
-        Local directory to sync raw files into (created if missing).
+        Dossier local a synchroniser avec les fichiers bruts (cree si absent).
 
     Returns
     -------
     list[Path]
-        Local paths of files that were downloaded (excludes skipped files).
+        Chemins locaux des fichiers effectivement telecharges (les fichiers
+        ignores car deja a jour ne sont pas inclus).
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     client = _client(cfg)
@@ -60,34 +63,35 @@ def download_raw_data(cfg: MinioConfig, dest_dir: Path) -> list[Path]:
 
         local_path = dest_dir / name
         if local_path.exists() and local_path.stat().st_size == obj.size:
-            logger.debug("Skipping {} (already up to date)", name)
+            logger.debug("Ignore {} (deja a jour)", name)
             continue
 
-        logger.info("Downloading {} from MinIO ({} bytes)", name, obj.size)
+        logger.info("Telechargement de {} depuis MinIO ({} octets)", name, obj.size)
         client.fget_object(cfg.bucket, obj.object_name, str(local_path))
         downloaded.append(local_path)
 
     logger.info(
-        "MinIO sync complete: {} file(s) downloaded to {}", len(downloaded), dest_dir
+        "Synchronisation MinIO terminee : {} fichier(s) telecharge(s) vers {}",
+        len(downloaded), dest_dir,
     )
     return downloaded
 
 
 def upload_cleaned_data(cfg: MinioConfig, file_path: Path) -> str:
     """
-    Upload a single cleaned data file to the ``cleaned_prefix`` location.
+    Envoie un fichier de donnees nettoyees vers l'emplacement ``cleaned_prefix``.
 
     Parameters
     ----------
     cfg : MinioConfig
-        MinIO connection settings.
+        Parametres de connexion MinIO.
     file_path : Path
-        Local file to upload (e.g. ``data/cleaned/cnps_cleaned.parquet``).
+        Fichier local a envoyer (ex. ``data/cleaned/cnps_cleaned.parquet``).
 
     Returns
     -------
     str
-        The destination object name in the bucket.
+        Nom de l'objet de destination dans le bucket.
     """
     client = _client(cfg)
     if not client.bucket_exists(cfg.bucket):
@@ -95,5 +99,5 @@ def upload_cleaned_data(cfg: MinioConfig, file_path: Path) -> str:
 
     object_name = f"{cfg.cleaned_prefix}{file_path.name}"
     client.fput_object(cfg.bucket, object_name, str(file_path))
-    logger.info("Uploaded {} to MinIO as {}/{}", file_path, cfg.bucket, object_name)
+    logger.info("Fichier {} envoye vers MinIO sous {}/{}", file_path, cfg.bucket, object_name)
     return object_name
