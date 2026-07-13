@@ -74,6 +74,19 @@ estimation:
   # Plage de salaire plausible (FCFA)
   salary_plausible_range: [75000, 50000000]
 
+# --- Stockage objet MinIO ---
+minio:
+  # Adresse du serveur MinIO (reseau interne)
+  endpoint: "192.168.1.230:31157"
+  # Bucket source des donnees CNPS
+  bucket: "admindataanstat"
+  # Prefixe des fichiers bruts dans le bucket
+  raw_prefix: "CNPS/raw_data/"
+  # Prefixe de depot des donnees nettoyees
+  cleaned_prefix: "CNPS/cleaned_data/"
+  # Connexion chiffree (le serveur interne tourne en HTTP simple)
+  secure: false
+
 # --- Parallelisation ---
 parallel:
   # Nombre de workers (-1 = tous les coeurs)

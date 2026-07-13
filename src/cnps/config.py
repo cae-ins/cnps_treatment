@@ -7,6 +7,7 @@ Provides a typed, immutable configuration object used across all pipeline stages
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,6 +66,23 @@ class EstimationConfig:
 
 
 @dataclass(frozen=True)
+class MinioConfig:
+    """Connection settings for the MinIO object storage server.
+
+    Credentials are never read from YAML: they come from the
+    ``MINIO_ACCESS_KEY`` / ``MINIO_SECRET_KEY`` environment variables so
+    they can differ per machine and stay out of version control.
+    """
+    endpoint: str
+    bucket: str
+    raw_prefix: str
+    cleaned_prefix: str
+    secure: bool
+    access_key: str
+    secret_key: str
+
+
+@dataclass(frozen=True)
 class ParallelConfig:
     """Parallelisation settings."""
     n_jobs: int
@@ -107,6 +125,7 @@ class PipelineConfig:
     cleaning: CleaningConfig
     modeling: ModelingConfig
     estimation: EstimationConfig
+    minio: MinioConfig
     parallel: ParallelConfig
     dimensions: list[DimensionDef]
     statistics: list[StatDef]
@@ -198,6 +217,17 @@ def load_config(
         salary_plausible_range=tuple(e["salary_plausible_range"]),
     )
 
+    mi = settings["minio"]
+    minio = MinioConfig(
+        endpoint=mi["endpoint"],
+        bucket=mi["bucket"],
+        raw_prefix=mi["raw_prefix"],
+        cleaned_prefix=mi["cleaned_prefix"],
+        secure=mi["secure"],
+        access_key=os.environ.get("MINIO_ACCESS_KEY", "minioadmin"),
+        secret_key=os.environ.get("MINIO_SECRET_KEY", "minioadmin"),
+    )
+
     parallel = ParallelConfig(**settings["parallel"])
 
     # --- Dimensions ---
@@ -227,6 +257,7 @@ def load_config(
         cleaning=cleaning,
         modeling=modeling,
         estimation=estimation,
+        minio=minio,
         parallel=parallel,
         dimensions=dimensions,
         statistics=statistics,
