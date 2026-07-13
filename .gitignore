@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Data (stored on MinIO, not in git)
+data/
+*.xlsx
+*.parquet
+*.csv
+
+# Logs & runtime artifacts
+logs/
+sessions/
+models/
+
+# OS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/

@@ -1,0 +1,119 @@
+# =============================================================================
+# Dimensions analytiques et definitions statistiques
+# =============================================================================
+# Chaque dimension definit un axe d'analyse pour le calcul des indicateurs.
+# Les classes definissent les regroupements pour les variables continues.
+# =============================================================================
+
+# --- Dimensions d'analyse ---
+dimensions:
+  global:
+    label: "National"
+    group_by: []
+    enabled: true
+
+  sector:
+    label: "Secteur d'activite"
+    group_by: ["SECTEUR_ACTIVITE_COD"]
+    enabled: true
+
+  age_employee:
+    label: "Tranche d'age des employes"
+    group_by: ["CL_AGE_EMPLOYE"]
+    enabled: true
+    classes:
+      - { label: "Moins de 25 ans", min: 0, max: 25 }
+      - { label: "25-34 ans", min: 25, max: 35 }
+      - { label: "35-49 ans", min: 35, max: 50 }
+      - { label: "50 ans et plus", min: 50, max: 999 }
+
+  seniority_firm:
+    label: "Anciennete dans l'entreprise"
+    group_by: ["CL_ANCIENNETE_ENTREPRISE"]
+    enabled: true
+    classes:
+      - { label: "Moins de 2 ans", min: 0, max: 2 }
+      - { label: "2-4 ans", min: 2, max: 5 }
+      - { label: "5-9 ans", min: 5, max: 10 }
+      - { label: "10 ans et plus", min: 10, max: 999 }
+
+  seniority_registration:
+    label: "Anciennete d'immatriculation"
+    group_by: ["CL_ANCIENNETE_IMMAT"]
+    enabled: true
+    classes:
+      - { label: "Moins de 2 ans", min: 0, max: 2 }
+      - { label: "2-4 ans", min: 2, max: 5 }
+      - { label: "5-9 ans", min: 5, max: 10 }
+      - { label: "10 ans et plus", min: 10, max: 999 }
+
+  firm_age:
+    label: "Age de l'entreprise"
+    group_by: ["CL_AGE_ENTREPRISE"]
+    enabled: true
+    classes:
+      - { label: "Moins de 2 ans", min: 0, max: 2 }
+      - { label: "2-4 ans", min: 2, max: 5 }
+      - { label: "5-9 ans", min: 5, max: 10 }
+      - { label: "10 ans et plus", min: 10, max: 999 }
+
+  firm_size:
+    label: "Taille de l'entreprise (detaille)"
+    group_by: ["CLASSE_EFFECTIF"]
+    enabled: true
+    classes:
+      - { label: "1 salarie", min: 1, max: 1 }
+      - { label: "2-5 salaries", min: 2, max: 5 }
+      - { label: "6-10 salaries", min: 6, max: 10 }
+      - { label: "11-20 salaries", min: 11, max: 20 }
+      - { label: "21-50 salaries", min: 21, max: 50 }
+      - { label: "51-100 salaries", min: 51, max: 100 }
+      - { label: "101-200 salaries", min: 101, max: 200 }
+      - { label: "201-500 salaries", min: 201, max: 500 }
+      - { label: "501-1000 salaries", min: 501, max: 1000 }
+      - { label: "Plus de 1000 salaries", min: 1001, max: 999999 }
+
+  firm_size_reduced:
+    label: "Taille de l'entreprise (reduit)"
+    group_by: ["CLASSE_EFFECTIF_REDUITE"]
+    enabled: true
+    classes:
+      - { label: "Micro (1-10)", min: 1, max: 10 }
+      - { label: "Petite (11-50)", min: 11, max: 50 }
+      - { label: "Moyenne (51-200)", min: 51, max: 200 }
+      - { label: "Grande (201+)", min: 201, max: 999999 }
+
+  sex:
+    label: "Sexe"
+    group_by: ["SEXE"]
+    enabled: true
+
+  commune:
+    label: "Commune"
+    group_by: ["COMMUNE"]
+    enabled: true
+
+  csp:
+    label: "Categorie socio-professionnelle"
+    group_by: ["CSP"]
+    enabled: true
+
+  profession:
+    label: "Profession"
+    group_by: ["PROFESSION"]
+    enabled: true
+
+# --- Statistiques a calculer ---
+statistics:
+  - { name: "n_obs", label: "Effectif non pondere", function: "count" }
+  - { name: "n_weighted", label: "Effectif pondere", function: "weighted_count" }
+  - { name: "mean", label: "Salaire moyen", function: "weighted_mean" }
+  - { name: "variance", label: "Variance", function: "weighted_variance" }
+  - { name: "min", label: "Minimum", function: "min" }
+  - { name: "p10", label: "1er decile", function: "weighted_quantile", params: { q: 0.10 } }
+  - { name: "q1", label: "1er quartile", function: "weighted_quantile", params: { q: 0.25 } }
+  - { name: "median", label: "Mediane", function: "weighted_quantile", params: { q: 0.50 } }
+  - { name: "q3", label: "3eme quartile", function: "weighted_quantile", params: { q: 0.75 } }
+  - { name: "p90", label: "9eme decile", function: "weighted_quantile", params: { q: 0.90 } }
+  - { name: "max", label: "Maximum", function: "max" }
+  - { name: "gini", label: "Coefficient de Gini", function: "gini" }
