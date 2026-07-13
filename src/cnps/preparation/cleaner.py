@@ -31,6 +31,7 @@ import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig
+from cnps.storage import upload_cleaned_data
 
 
 # ---------------------------------------------------------------------------
@@ -247,5 +248,10 @@ def clean(cfg: PipelineConfig) -> Path:
     out_path = cfg.paths.cleaned_data / "cnps_cleaned.parquet"
     df.write_parquet(out_path, compression="zstd")
     logger.info("Cleaned data written: {} ({} rows, {} cols)", out_path, df.height, df.width)
+
+    try:
+        upload_cleaned_data(cfg.minio, out_path)
+    except Exception as exc:
+        logger.warning("MinIO upload failed, cleaned data kept locally only: {}", exc)
 
     return out_path
