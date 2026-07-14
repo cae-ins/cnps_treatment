@@ -73,15 +73,17 @@ class ValidationReport:
 def valider_donnees(cfg: PipelineConfig) -> ValidationReport:
     """Execute les controles qualite sur le jeu de donnees nettoye."""
     report = ValidationReport()
+    bucket = cfg.minio.cleaned_bucket
     cleaned_object = f"{cfg.minio.cleaned_prefix}cnps_cleaned.parquet"
 
-    if not object_exists(cfg.minio, cleaned_object):
+    if not object_exists(cfg.minio, bucket, cleaned_object):
         report.issues.append(ValidationIssue(
-            "ERROR", "data", "file_exists", f"Donnees nettoyees introuvables : {cleaned_object}",
+            "ERROR", "data", "file_exists",
+            f"Donnees nettoyees introuvables : {bucket}/{cleaned_object}",
         ))
         return report
 
-    df = read_parquet(cfg.minio, cleaned_object)
+    df = read_parquet(cfg.minio, bucket, cleaned_object)
 
     if df.height == 0:
         report.issues.append(ValidationIssue(
@@ -147,9 +149,10 @@ def valider_modeles(cfg: PipelineConfig) -> ValidationReport:
     """Execute les diagnostics sur les modeles sauvegardes."""
     report = ValidationReport()
 
+    models_bucket = cfg.minio.models_bucket
     decl_object = f"{cfg.minio.models_prefix}declaration_model.pkl"
-    if object_exists(cfg.minio, decl_object):
-        model_data = read_pickle(cfg.minio, decl_object)
+    if object_exists(cfg.minio, models_bucket, decl_object):
+        model_data = read_pickle(cfg.minio, models_bucket, decl_object)
 
         auc = model_data.get("auc", 0)
         if auc < cfg.modeling.min_auc:
@@ -167,8 +170,8 @@ def valider_modeles(cfg: PipelineConfig) -> ValidationReport:
         ))
 
     imp_object = f"{cfg.minio.models_prefix}imputation_model.pkl"
-    if object_exists(cfg.minio, imp_object):
-        model_data = read_pickle(cfg.minio, imp_object)
+    if object_exists(cfg.minio, models_bucket, imp_object):
+        model_data = read_pickle(cfg.minio, models_bucket, imp_object)
         r2 = model_data.get("r_squared", 0)
         report.issues.append(ValidationIssue(
             "INFO", "model", "imputation_r2", f"R2 du modele d'imputation={r2:.4f}",
@@ -179,8 +182,8 @@ def valider_modeles(cfg: PipelineConfig) -> ValidationReport:
         ))
 
     firm_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
-    if object_exists(cfg.minio, firm_object):
-        df = read_parquet(cfg.minio, firm_object)
+    if object_exists(cfg.minio, cfg.minio.cleaned_bucket, firm_object):
+        df = read_parquet(cfg.minio, cfg.minio.cleaned_bucket, firm_object)
         if "W_JT" in df.columns:
             w = df["W_JT"].drop_nulls().to_numpy()
             cv = float(np.std(w) / np.mean(w)) if np.mean(w) > 0 else np.inf

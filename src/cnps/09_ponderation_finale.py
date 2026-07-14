@@ -130,12 +130,13 @@ def calculer_poids_finaux(cfg: PipelineConfig) -> str:
     str
         Nom de l'objet de la base analytique mise a jour avec les poids finaux.
     """
+    bucket = cfg.minio.cleaned_bucket
     analytical_object = f"{cfg.minio.cleaned_prefix}analytical_base.parquet"
 
-    if not object_exists(cfg.minio, analytical_object):
-        raise FileNotFoundError(f"Base analytique introuvable : {analytical_object}")
+    if not object_exists(cfg.minio, bucket, analytical_object):
+        raise FileNotFoundError(f"Base analytique introuvable : {bucket}/{analytical_object}")
 
-    df = read_parquet(cfg.minio, analytical_object)
+    df = read_parquet(cfg.minio, bucket, analytical_object)
     method = cfg.modeling.estimation_method
 
     logger.info("Calcul des poids finaux avec la methode : {}", method)
@@ -179,7 +180,7 @@ def calculer_poids_finaux(cfg: PipelineConfig) -> str:
             .alias("W_FINAL")
         )
 
-    write_parquet(cfg.minio, analytical_object, df)
+    write_parquet(cfg.minio, bucket, analytical_object, df)
     logger.info("Poids finaux calcules : moyenne={:.3f}, ecart-type={:.3f}",
                 df["W_FINAL"].mean(), df["W_FINAL"].std())
 

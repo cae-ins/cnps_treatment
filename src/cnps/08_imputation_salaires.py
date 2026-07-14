@@ -106,11 +106,12 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
         Nom de l'objet de la base entreprises imputee (format long,
         colonne ``IMPUTATION_ID``).
     """
+    cleaned_bucket = cfg.minio.cleaned_bucket
     firm_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
-    if not object_exists(cfg.minio, firm_object):
-        raise FileNotFoundError(f"Base entreprises introuvable : {firm_object}")
+    if not object_exists(cfg.minio, cleaned_bucket, firm_object):
+        raise FileNotFoundError(f"Base entreprises introuvable : {cleaned_bucket}/{firm_object}")
 
-    df = read_parquet(cfg.minio, firm_object)
+    df = read_parquet(cfg.minio, cleaned_bucket, firm_object)
     M = cfg.modeling.n_imputations
     rng = np.random.default_rng(cfg.modeling.random_seed)
 
@@ -120,7 +121,7 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
         logger.info("Aucune entreprise non-declarante a imputer.")
         df = df.with_columns(pl.lit(0).cast(pl.Int32).alias("IMPUTATION_ID"))
         out_object = f"{cfg.minio.cleaned_prefix}firm_base_imputed.parquet"
-        write_parquet(cfg.minio, out_object, df)
+        write_parquet(cfg.minio, cleaned_bucket, out_object, df)
         return out_object
 
     # --- Ajustement OLS sur log(salaire) ---
@@ -181,11 +182,11 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
     result = pl.concat(all_frames, how="diagonal")
 
     out_object = f"{cfg.minio.cleaned_prefix}firm_base_imputed.parquet"
-    write_parquet(cfg.minio, out_object, result)
+    write_parquet(cfg.minio, cleaned_bucket, out_object, result)
     logger.info("Base entreprises imputee : {} lignes (M={}) -> {}", result.height, M, out_object)
 
     model_object = f"{cfg.minio.models_prefix}imputation_model.pkl"
-    write_pickle(cfg.minio, model_object, {
+    write_pickle(cfg.minio, cfg.minio.models_bucket, model_object, {
         "model": model, "sigma": sigma_hat, "r_squared": r_squared,
         "features": features,
     })

@@ -109,7 +109,9 @@ def _read_single_excel(data: bytes, filename: str, skip_sheets: list[str]) -> pl
 
 def _process_one_file(
     minio_cfg: MinioConfig,
+    raw_bucket: str,
     object_name: str,
+    processed_bucket: str,
     processed_prefix: str,
     filename_regex: str,
     skip_sheets: list[str],
@@ -119,7 +121,7 @@ def _process_one_file(
     month, year = _parse_period(filename, filename_regex)
     logger.info("Ingestion de {} (periode: {:02d}/{:04d})", filename, month, year)
 
-    data = read_excel_bytes(minio_cfg, object_name).getvalue()
+    data = read_excel_bytes(minio_cfg, raw_bucket, object_name).getvalue()
     df = _read_single_excel(data, filename, skip_sheets)
     if df.height == 0:
         return {"file": filename, "status": "empty", "rows": 0}
@@ -131,7 +133,7 @@ def _process_one_file(
     )
 
     out_object = f"{processed_prefix}{month:02d}_{year:04d}.parquet"
-    write_parquet(minio_cfg, out_object, df)
+    write_parquet(minio_cfg, processed_bucket, out_object, df)
 
     return {
         "file": filename,
@@ -147,19 +149,20 @@ def _process_one_file(
 class _FileRegistry:
     """Registre JSON (stocke sur MinIO) des fichiers deja traites et de leur hash."""
 
-    def __init__(self, minio_cfg: MinioConfig, processed_prefix: str) -> None:
+    def __init__(self, minio_cfg: MinioConfig, processed_bucket: str, processed_prefix: str) -> None:
         self._cfg = minio_cfg
+        self._bucket = processed_bucket
         self._object_name = f"{processed_prefix}{_REGISTRY_OBJECT_NAME}"
         self._data: dict[str, str] = {}
-        if object_exists(minio_cfg, self._object_name):
-            self._data = read_json(minio_cfg, self._object_name)
+        if object_exists(minio_cfg, processed_bucket, self._object_name):
+            self._data = read_json(minio_cfg, processed_bucket, self._object_name)
 
     def needs_processing(self, filename: str, data: bytes) -> bool:
         return self._data.get(filename) != _bytes_hash(data)
 
     def update(self, file_name: str, file_hash: str) -> None:
         self._data[file_name] = file_hash
-        write_json(self._cfg, self._object_name, self._data)
+        write_json(self._cfg, self._bucket, self._object_name, self._data)
 
 
 # ---------------------------------------------------------------------------
@@ -185,24 +188,25 @@ def lire_fichiers(cfg: PipelineConfig) -> list[dict]:
     """
     filename_regex = cfg.ingestion.filename_regex
 
-    all_objects = list_objects(cfg.minio, cfg.minio.raw_prefix, recursive=False)
+    all_objects = list_objects(cfg.minio, cfg.minio.raw_bucket, cfg.minio.raw_prefix, recursive=False)
     files = sorted(
         obj for obj in all_objects
         if re.match(filename_regex, obj.rsplit("/", 1)[-1])
     )
     if not files:
         logger.warning(
-            "Aucun objet correspondant a '{}' sous '{}'", filename_regex, cfg.minio.raw_prefix,
+            "Aucun objet correspondant a '{}' sous '{}/{}'",
+            filename_regex, cfg.minio.raw_bucket, cfg.minio.raw_prefix,
         )
         return []
 
-    registry = _FileRegistry(cfg.minio, cfg.minio.processed_prefix)
+    registry = _FileRegistry(cfg.minio, cfg.minio.processed_bucket, cfg.minio.processed_prefix)
 
     # Ne garde que les fichiers modifies (necessite de les telecharger pour les hasher)
     to_process: list[str] = []
     for object_name in files:
         filename = object_name.rsplit("/", 1)[-1]
-        data = read_excel_bytes(cfg.minio, object_name).getvalue()
+        data = read_excel_bytes(cfg.minio, cfg.minio.raw_bucket, object_name).getvalue()
         if registry.needs_processing(filename, data):
             to_process.append(object_name)
     logger.info("{} fichiers trouves, {} a traiter", len(files), len(to_process))
@@ -216,7 +220,8 @@ def lire_fichiers(cfg: PipelineConfig) -> list[dict]:
     if len(to_process) == 1 or cfg.parallel.n_jobs == 1:
         results = [
             _process_one_file(
-                cfg.minio, object_name, cfg.minio.processed_prefix,
+                cfg.minio, cfg.minio.raw_bucket, object_name,
+                cfg.minio.processed_bucket, cfg.minio.processed_prefix,
                 filename_regex, cfg.ingestion.skip_sheets,
             )
             for object_name in to_process
@@ -224,7 +229,8 @@ def lire_fichiers(cfg: PipelineConfig) -> list[dict]:
     else:
         results = Parallel(n_jobs=cfg.parallel.n_jobs, backend=cfg.parallel.backend)(
             delayed(_process_one_file)(
-                cfg.minio, object_name, cfg.minio.processed_prefix,
+                cfg.minio, cfg.minio.raw_bucket, object_name,
+                cfg.minio.processed_bucket, cfg.minio.processed_prefix,
                 filename_regex, cfg.ingestion.skip_sheets,
             )
             for object_name in to_process

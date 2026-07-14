@@ -119,15 +119,18 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
     str
         Nom de l'objet Parquet nettoye sur MinIO.
     """
-    all_objects = list_objects(cfg.minio, cfg.minio.processed_prefix, recursive=False)
+    processed_bucket = cfg.minio.processed_bucket
+    all_objects = list_objects(cfg.minio, processed_bucket, cfg.minio.processed_prefix, recursive=False)
     files = sorted(obj for obj in all_objects if re.search(r"\.parquet$", obj))
 
     if not files:
-        raise FileNotFoundError(f"Aucun fichier Parquet sous {cfg.minio.processed_prefix}")
+        raise FileNotFoundError(
+            f"Aucun fichier Parquet sous {processed_bucket}/{cfg.minio.processed_prefix}"
+        )
 
     # --- 1. Concatenation ---
     logger.info("Concatenation de {} fichiers mensuels", len(files))
-    frames = [read_parquet(cfg.minio, f) for f in files]
+    frames = [read_parquet(cfg.minio, processed_bucket, f) for f in files]
 
     # Aligne les schemas (union des colonnes)
     all_cols = dict.fromkeys(col for f in frames for col in f.columns)
@@ -220,7 +223,7 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
 
     # --- 3. Ecriture ---
     out_object = f"{cfg.minio.cleaned_prefix}cnps_cleaned.parquet"
-    write_parquet(cfg.minio, out_object, df)
+    write_parquet(cfg.minio, cfg.minio.cleaned_bucket, out_object, df)
     logger.info("Donnees nettoyees ecrites : {} ({} lignes, {} colonnes)",
                 out_object, df.height, df.width)
 

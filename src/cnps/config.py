@@ -69,17 +69,26 @@ class EstimationConfig:
 class MinioConfig:
     """Parametres de connexion au serveur de stockage objet MinIO.
 
+    Organisation en couches (medaillon) : chaque etape du pipeline lit et
+    ecrit dans un bucket different, chacun avec son propre prefixe interne.
+    Un couple (bucket, prefixe) localise donc chaque famille de fichiers,
+    par exemple ``raw_bucket``/``raw_prefix`` pour les Excel bruts.
+
     Les identifiants ne sont jamais lus depuis le YAML : ils viennent des
     variables d'environnement ``MINIO_ACCESS_KEY`` / ``MINIO_SECRET_KEY``
     afin de pouvoir differer selon la machine et de rester hors du
     controle de version.
     """
     endpoint: str
-    bucket: str
+    raw_bucket: str
     raw_prefix: str
+    processed_bucket: str
     processed_prefix: str
+    cleaned_bucket: str
     cleaned_prefix: str
+    models_bucket: str
     models_prefix: str
+    output_bucket: str
     output_prefix: str
     secure: bool
     access_key: str
@@ -226,11 +235,15 @@ def load_config(
     mi = settings["minio"]
     minio = MinioConfig(
         endpoint=mi["endpoint"],
-        bucket=mi["bucket"],
+        raw_bucket=mi["raw_bucket"],
         raw_prefix=mi["raw_prefix"],
+        processed_bucket=mi["processed_bucket"],
         processed_prefix=mi["processed_prefix"],
+        cleaned_bucket=mi["cleaned_bucket"],
         cleaned_prefix=mi["cleaned_prefix"],
+        models_bucket=mi["models_bucket"],
         models_prefix=mi["models_prefix"],
+        output_bucket=mi["output_bucket"],
         output_prefix=mi["output_prefix"],
         secure=mi["secure"],
         access_key=os.environ.get("MINIO_ACCESS_KEY", "minioadmin"),

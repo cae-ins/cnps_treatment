@@ -35,15 +35,16 @@ def construire_base_analytique(cfg: PipelineConfig) -> str:
     str
         Nom de l'objet Parquet de la base analytique sur MinIO.
     """
+    bucket = cfg.minio.cleaned_bucket
     indiv_object = f"{cfg.minio.cleaned_prefix}individual_base.parquet"
     firm_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
 
     for obj, label in [(indiv_object, "individus"), (firm_object, "entreprises")]:
-        if not object_exists(cfg.minio, obj):
-            raise FileNotFoundError(f"Base {label} introuvable : {obj}")
+        if not object_exists(cfg.minio, bucket, obj):
+            raise FileNotFoundError(f"Base {label} introuvable : {bucket}/{obj}")
 
-    indiv = read_parquet(cfg.minio, indiv_object)
-    firm = read_parquet(cfg.minio, firm_object)
+    indiv = read_parquet(cfg.minio, bucket, indiv_object)
+    firm = read_parquet(cfg.minio, bucket, firm_object)
 
     logger.info("Fusion individus ({} lignes) avec entreprises ({} lignes)",
                 indiv.height, firm.height)
@@ -81,7 +82,7 @@ def construire_base_analytique(cfg: PipelineConfig) -> str:
                                col, dim.label)
 
     out_object = f"{cfg.minio.cleaned_prefix}analytical_base.parquet"
-    write_parquet(cfg.minio, out_object, analytical)
+    write_parquet(cfg.minio, bucket, out_object, analytical)
     logger.info("Base analytique : {} lignes, {} colonnes -> {}",
                 analytical.height, analytical.width, out_object)
 

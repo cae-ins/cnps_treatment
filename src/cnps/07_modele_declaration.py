@@ -117,11 +117,12 @@ def ajuster_modele_declaration(cfg: PipelineConfig) -> str:
     str
         Nom de l'objet de la base entreprises mise a jour avec les poids IPW.
     """
+    cleaned_bucket = cfg.minio.cleaned_bucket
     firm_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
-    if not object_exists(cfg.minio, firm_object):
-        raise FileNotFoundError(f"Base entreprises introuvable : {firm_object}")
+    if not object_exists(cfg.minio, cleaned_bucket, firm_object):
+        raise FileNotFoundError(f"Base entreprises introuvable : {cleaned_bucket}/{firm_object}")
 
-    df = read_parquet(cfg.minio, firm_object)
+    df = read_parquet(cfg.minio, cleaned_bucket, firm_object)
     logger.info("Ajustement du modele de declaration sur {} enregistrements entreprise-periode",
                 df.height)
 
@@ -188,7 +189,7 @@ def ajuster_modele_declaration(cfg: PipelineConfig) -> str:
     if "NUMERO_EMPLOYEUR" in df_model.columns and "PERIOD" in df_model.columns:
         join_cols = ["NUMERO_EMPLOYEUR", "PERIOD"]
         weights_df = df_model.select(join_cols + ["W_JT", "P_HAT_JT"])
-        df_orig = read_parquet(cfg.minio, firm_object).drop(["W_JT"], strict=False)
+        df_orig = read_parquet(cfg.minio, cleaned_bucket, firm_object).drop(["W_JT"], strict=False)
         df_updated = df_orig.join(weights_df, on=join_cols, how="left")
         df_updated = df_updated.with_columns(
             pl.col("W_JT").fill_null(1.0),
@@ -196,11 +197,11 @@ def ajuster_modele_declaration(cfg: PipelineConfig) -> str:
     else:
         df_updated = df_model
 
-    write_parquet(cfg.minio, firm_object, df_updated)
+    write_parquet(cfg.minio, cleaned_bucket, firm_object, df_updated)
 
     # --- Sauvegarde du modele ---
     model_object = f"{cfg.minio.models_prefix}declaration_model.pkl"
-    write_pickle(cfg.minio, model_object, {
+    write_pickle(cfg.minio, cfg.minio.models_bucket, model_object, {
         "model": model, "auc": auc, "features": cat_feats + num_feats,
     })
     logger.info("Modele de declaration sauvegarde : {}", model_object)

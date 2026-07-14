@@ -53,11 +53,12 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
     str
         Nom de l'objet Parquet de la base entreprises sur MinIO.
     """
+    bucket = cfg.minio.cleaned_bucket
     indiv_object = f"{cfg.minio.cleaned_prefix}individual_base.parquet"
-    if not object_exists(cfg.minio, indiv_object):
-        raise FileNotFoundError(f"Base individus introuvable : {indiv_object}")
+    if not object_exists(cfg.minio, bucket, indiv_object):
+        raise FileNotFoundError(f"Base individus introuvable : {bucket}/{indiv_object}")
 
-    df = read_parquet(cfg.minio, indiv_object)
+    df = read_parquet(cfg.minio, bucket, indiv_object)
     logger.info("Construction de la base entreprises a partir de {} enregistrements individus",
                 df.height)
 
@@ -163,7 +164,7 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
             )
 
     out_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
-    write_parquet(cfg.minio, out_object, firm_df)
+    write_parquet(cfg.minio, bucket, out_object, firm_df)
     logger.info("Base entreprises : {} lignes -> {}", firm_df.height, out_object)
 
     return out_object

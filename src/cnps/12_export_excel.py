@@ -128,7 +128,7 @@ def exporter_indicateurs(
 
         wb.close()
 
-    write_workbook(cfg.minio, out_object, _write)
+    write_workbook(cfg.minio, cfg.minio.output_bucket, out_object, _write)
     logger.info("Indicateurs exportes vers {}", out_object)
     return out_object
 
@@ -161,6 +161,6 @@ def exporter_rapport_validation(
             ws.write(0, 0, "Aucun probleme detecte")
             wb.close()
 
-    write_workbook(cfg.minio, out_object, _write)
+    write_workbook(cfg.minio, cfg.minio.output_bucket, out_object, _write)
     logger.info("Rapport de validation exporte vers {}", out_object)
     return out_object

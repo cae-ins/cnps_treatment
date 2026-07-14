@@ -179,6 +179,7 @@ def run_pipeline(
     # Sauvegarde des metadonnees de session sur MinIO
     from cnps.storage import write_json
     session_object = f"{cfg.minio.output_prefix}sessions/{session_id}/metadata.json"
+    session_bucket = cfg.minio.output_bucket
     meta = {
         "session_id": session_id,
         "start_time": start_time,
@@ -191,7 +192,7 @@ def run_pipeline(
             for s in results
         ],
     }
-    write_json(cfg.minio, session_object, meta)
+    write_json(cfg.minio, session_bucket, session_object, meta)
 
     status = "SUCCES" if pipeline_result.success else "ECHEC"
     logger.info("Pipeline {} : {:.1f}s au total", status, dt_total)

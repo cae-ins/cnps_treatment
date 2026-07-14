@@ -180,25 +180,26 @@ def harmoniser_types(cfg: PipelineConfig) -> list[str]:
     list[str]
         Noms des objets Parquet harmonises.
     """
-    all_objects = list_objects(cfg.minio, cfg.minio.processed_prefix, recursive=False)
+    bucket = cfg.minio.processed_bucket
+    all_objects = list_objects(cfg.minio, bucket, cfg.minio.processed_prefix, recursive=False)
     files = sorted(obj for obj in all_objects if re.search(r"\.parquet$", obj))
 
     if not files:
-        logger.warning("Aucun fichier Parquet trouve sous {}", cfg.minio.processed_prefix)
+        logger.warning("Aucun fichier Parquet trouve sous {}/{}", bucket, cfg.minio.processed_prefix)
         return []
 
     result_objects: list[str] = []
 
     for object_name in files:
         logger.info("Harmonisation des types : {}", object_name)
-        df = read_parquet(cfg.minio, object_name)
+        df = read_parquet(cfg.minio, bucket, object_name)
 
         df = _normalize_column_names(df)
         df = _ensure_string_ids(df, _ID_COLS)
         df = _coerce_numeric(df, _NUMERIC_COLS)
         df = _coerce_dates(df, _DATE_COLS)
 
-        write_parquet(cfg.minio, object_name, df)
+        write_parquet(cfg.minio, bucket, object_name, df)
         result_objects.append(object_name)
 
         logger.debug("  {} -> {} lignes, {} colonnes", object_name, df.height, df.width)

@@ -317,7 +317,7 @@ def _estimate_with_imputations(
     enabled_dims: list[DimensionDef],
 ) -> pl.DataFrame:
     """Estime avec combinaison de Rubin sur les imputations multiples."""
-    imputed = read_parquet(cfg.minio, imputed_object)
+    imputed = read_parquet(cfg.minio, cfg.minio.cleaned_bucket, imputed_object)
 
     if "IMPUTATION_ID" not in imputed.columns:
         logger.warning("Aucun IMPUTATION_ID trouve, traite comme imputation unique")
@@ -402,6 +402,7 @@ def estimer_indicateurs(cfg: PipelineConfig) -> pl.DataFrame:
     pl.DataFrame
         Resultats avec colonnes : dimension, group, + une colonne par statistique.
     """
+    bucket = cfg.minio.cleaned_bucket
     analytical_object = f"{cfg.minio.cleaned_prefix}analytical_base.parquet"
     imputed_object = f"{cfg.minio.cleaned_prefix}firm_base_imputed.parquet"
 
@@ -411,16 +412,16 @@ def estimer_indicateurs(cfg: PipelineConfig) -> pl.DataFrame:
     statistics = cfg.statistics
     enabled_dims = [d for d in cfg.dimensions if d.enabled]
 
-    if object_exists(cfg.minio, imputed_object):
+    if object_exists(cfg.minio, bucket, imputed_object):
         logger.info("Imputations multiples detectees, utilisation des regles de Rubin")
         return _estimate_with_imputations(
             cfg, imputed_object, salary_col, weight_col, min_cell, statistics, enabled_dims,
         )
 
-    if not object_exists(cfg.minio, analytical_object):
-        raise FileNotFoundError(f"Base analytique introuvable : {analytical_object}")
+    if not object_exists(cfg.minio, bucket, analytical_object):
+        raise FileNotFoundError(f"Base analytique introuvable : {bucket}/{analytical_object}")
 
-    df = read_parquet(cfg.minio, analytical_object)
+    df = read_parquet(cfg.minio, bucket, analytical_object)
 
     if salary_col not in df.columns:
         salary_col = "SALAIRE_BRUT" if "SALAIRE_BRUT" in df.columns else None

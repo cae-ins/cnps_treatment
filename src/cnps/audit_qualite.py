@@ -50,17 +50,17 @@ def _parse_period(filename: str) -> tuple[int, int]:
     return 0, 0
 
 
-def _load_files(minio_cfg, prefix: str) -> list[tuple[str, int, int, pl.DataFrame]]:
-    """Charge tous les objets Parquet sous un prefixe MinIO, tries par (ANNEE, MOIS)."""
+def _load_files(minio_cfg, bucket: str, prefix: str) -> list[tuple[str, int, int, pl.DataFrame]]:
+    """Charge tous les objets Parquet sous un bucket/prefixe MinIO, tries par (ANNEE, MOIS)."""
     objects = sorted(
-        obj for obj in list_objects(minio_cfg, prefix, recursive=False)
+        obj for obj in list_objects(minio_cfg, bucket, prefix, recursive=False)
         if obj.endswith(".parquet")
     )
     result = []
     for object_name in objects:
         filename = object_name.rsplit("/", 1)[-1]
         mois, annee = _parse_period(filename)
-        df = read_parquet(minio_cfg, object_name)
+        df = read_parquet(minio_cfg, bucket, object_name)
         result.append((filename, mois, annee, df))
     result.sort(key=lambda x: (x[2], x[1]))
     return result
@@ -410,6 +410,7 @@ def _write_transition_sheet(
 
 def _export_audit_excel(
     cfg: PipelineConfig,
+    output_bucket: str,
     output_object: str,
     *,
     doublons: pl.DataFrame,
@@ -463,7 +464,7 @@ def _export_audit_excel(
 
         wb.close()
 
-    write_workbook(cfg.minio, output_object, _write)
+    write_workbook(cfg.minio, output_bucket, output_object, _write)
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +474,9 @@ def _export_audit_excel(
 def executer_audit(
     cfg: PipelineConfig,
     *,
+    input_bucket: str | None = None,
     input_prefix: str | None = None,
+    output_bucket: str | None = None,
     output_prefix: str | None = None,
     salary_var: str = "SALAIRE_BRUT",
     id_var: str = "ID_INDIV",
@@ -486,9 +489,15 @@ def executer_audit(
     ----------
     cfg : PipelineConfig
         Configuration du pipeline.
+    input_bucket : str, optional
+        Bucket MinIO contenant les objets Parquet a auditer.
+        Par defaut : ``cfg.minio.processed_bucket``.
     input_prefix : str, optional
         Prefixe MinIO contenant les objets Parquet a auditer.
         Par defaut : ``cfg.minio.processed_prefix``.
+    output_bucket : str, optional
+        Bucket MinIO pour le fichier Excel de sortie.
+        Par defaut : ``cfg.minio.output_bucket``.
     output_prefix : str, optional
         Prefixe MinIO pour le fichier Excel de sortie.
         Par defaut : ``cfg.minio.output_prefix``.
@@ -504,8 +513,12 @@ def executer_audit(
     str
         Nom de l'objet Excel d'audit genere sur MinIO.
     """
+    if input_bucket is None:
+        input_bucket = cfg.minio.processed_bucket
     if input_prefix is None:
         input_prefix = cfg.minio.processed_prefix
+    if output_bucket is None:
+        output_bucket = cfg.minio.output_bucket
     if output_prefix is None:
         output_prefix = cfg.minio.output_prefix
 
@@ -515,11 +528,11 @@ def executer_audit(
     logger.info("=" * 60)
     logger.info("AUDIT QUALITE DES DONNEES")
     logger.info("=" * 60)
-    logger.info("Prefixe source : {}", input_prefix)
+    logger.info("Source : {}/{}", input_bucket, input_prefix)
 
-    data = _load_files(cfg.minio, input_prefix)
+    data = _load_files(cfg.minio, input_bucket, input_prefix)
     if not data:
-        logger.warning("Aucun fichier parquet trouve sous : {}", input_prefix)
+        logger.warning("Aucun fichier parquet trouve sous : {}/{}", input_bucket, input_prefix)
         return output_object
 
     logger.info("Fichiers a auditer : {}", len(data))
@@ -550,7 +563,7 @@ def executer_audit(
 
     logger.info("Export Excel...")
     _export_audit_excel(
-        cfg, output_object,
+        cfg, output_bucket, output_object,
         doublons=df_doublons, colonnes=df_colonnes, types=df_types,
         valeurs_manquantes=df_missing, outliers=df_outliers,
         unicite_id=df_unicite, top_doublons_id=df_top_dup, transitions=df_transitions,

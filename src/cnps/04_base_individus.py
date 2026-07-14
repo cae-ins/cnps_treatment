@@ -46,11 +46,12 @@ def construire_base_individus(cfg: PipelineConfig) -> str:
     str
         Nom de l'objet Parquet de la base individus sur MinIO.
     """
+    bucket = cfg.minio.cleaned_bucket
     cleaned_object = f"{cfg.minio.cleaned_prefix}cnps_cleaned.parquet"
-    if not object_exists(cfg.minio, cleaned_object):
-        raise FileNotFoundError(f"Donnees nettoyees introuvables : {cleaned_object}")
+    if not object_exists(cfg.minio, bucket, cleaned_object):
+        raise FileNotFoundError(f"Donnees nettoyees introuvables : {bucket}/{cleaned_object}")
 
-    df = read_parquet(cfg.minio, cleaned_object)
+    df = read_parquet(cfg.minio, bucket, cleaned_object)
     logger.info("Construction de la base individus a partir de {} lignes", df.height)
 
     # Identifiant d'observation
@@ -75,7 +76,7 @@ def construire_base_individus(cfg: PipelineConfig) -> str:
             )
 
     out_object = f"{cfg.minio.cleaned_prefix}individual_base.parquet"
-    write_parquet(cfg.minio, out_object, df)
+    write_parquet(cfg.minio, bucket, out_object, df)
     logger.info("Base individus : {} lignes, {} colonnes -> {}", df.height, df.width, out_object)
 
     return out_object

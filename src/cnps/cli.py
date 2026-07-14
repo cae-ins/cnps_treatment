@@ -168,8 +168,14 @@ def estimate(
 @app.command()
 def audit(
     settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
+    input_bucket: Optional[str] = typer.Option(
+        None, "--input-bucket", help="Bucket MinIO des parquets a auditer (defaut: processed_bucket)",
+    ),
     input_prefix: Optional[str] = typer.Option(
         None, "--input", "-i", help="Prefixe MinIO des parquets a auditer (defaut: processed_prefix)",
+    ),
+    output_bucket: Optional[str] = typer.Option(
+        None, "--output-bucket", help="Bucket MinIO pour le rapport Excel (defaut: output_bucket)",
     ),
     output_prefix: Optional[str] = typer.Option(
         None, "--output", "-o", help="Prefixe MinIO pour le rapport Excel (defaut: output_prefix)",
@@ -185,7 +191,9 @@ def audit(
     audit_module = importlib.import_module("cnps.audit_qualite")
     out = audit_module.executer_audit(
         cfg,
+        input_bucket=input_bucket,
         input_prefix=input_prefix,
+        output_bucket=output_bucket,
         output_prefix=output_prefix,
         salary_var=salary_var,
         id_var=id_var,
@@ -235,12 +243,11 @@ def config(
     console.print(f"  Logs:               {cfg.paths.logs}")
     console.print()
     console.print(f"  MinIO endpoint:     {cfg.minio.endpoint}")
-    console.print(f"  MinIO bucket:       {cfg.minio.bucket}")
-    console.print(f"  Prefixe brut:       {cfg.minio.raw_prefix}")
-    console.print(f"  Prefixe traite:     {cfg.minio.processed_prefix}")
-    console.print(f"  Prefixe nettoye:    {cfg.minio.cleaned_prefix}")
-    console.print(f"  Prefixe modeles:    {cfg.minio.models_prefix}")
-    console.print(f"  Prefixe sortie:     {cfg.minio.output_prefix}")
+    console.print(f"  Brut:       {cfg.minio.raw_bucket}/{cfg.minio.raw_prefix}")
+    console.print(f"  Traite:     {cfg.minio.processed_bucket}/{cfg.minio.processed_prefix}")
+    console.print(f"  Nettoye:    {cfg.minio.cleaned_bucket}/{cfg.minio.cleaned_prefix}")
+    console.print(f"  Modeles:    {cfg.minio.models_bucket}/{cfg.minio.models_prefix}")
+    console.print(f"  Sortie:     {cfg.minio.output_bucket}/{cfg.minio.output_prefix}")
     console.print()
     console.print(f"  Methode d'estimation: {cfg.modeling.estimation_method}")
     console.print(f"  Imputations:          {cfg.modeling.n_imputations}")
