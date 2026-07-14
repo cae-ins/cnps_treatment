@@ -12,7 +12,8 @@
       "Bash(/opt/homebrew/bin/python3.12 -c \"import platform; print\\(platform.machine\\(\\)\\)\")",
       "Bash(cd /Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2 *)",
       "Bash(.venv/bin/python run.py --help)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(.venv/bin/cnps config *)"
     ],
     "additionalDirectories": [
       "/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2"

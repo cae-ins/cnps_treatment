@@ -79,7 +79,7 @@ minio:
   # ATTENTION: ce prefixe contient aussi des CSV sans rapport (ETAT_TRAVAILLEUR_*.csv)
   # et un sous-dossier fichiers_mensuels/ : le code doit filtrer par extension/pattern,
   # ne jamais lister ce prefixe sans filtre.
-  raw_prefix: "cnps/"
+  raw_prefix: "cnps/fichiers_mensuels/"
   # Prefixe des parquets issus de l'ingestion (MM_YYYY.parquet) + registre de suivi
   processed_prefix: "cnps/processed_data/"
   # Prefixe des donnees nettoyees et des bases structurees
