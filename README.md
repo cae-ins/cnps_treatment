@@ -6,7 +6,7 @@ Pipeline de traitement statistique des declarations salariales de la **Caisse Na
 
 Produire des indicateurs statistiques fiables sur la distribution des salaires a partir des declarations mensuelles des employeurs, en corrigeant le biais de selection induit par la non-declaration.
 
-## Methodologie
+## Methodologie (resume)
 
 - **Estimation doublement robuste (AIPW)** : combine un modele de propension (logit) et un modele de resultat (OLS log-lineaire) pour une protection contre la mauvaise specification de l'un ou l'autre modele (Bang & Robins, 2005).
 - **Imputation multiple** (M=5) avec bootstrap residuel et regles de combinaison de Rubin (1987).
@@ -14,345 +14,195 @@ Produire des indicateurs statistiques fiables sur la distribution des salaires a
 
 Voir [docs/methodology.md](docs/methodology.md) pour la note methodologique detaillee avec toutes les references.
 
+## Toutes les donnees vivent sur MinIO — jamais sur disque local
+
+Ce pipeline ne lit et n'ecrit **aucun fichier de donnees en local**. Excel bruts, Parquets intermediaires, modeles `.pkl`, exports Excel finaux : tout transite par un serveur de stockage objet **MinIO**, via des buffers memoire (`io.BytesIO`). Le seul fichier local produit est le journal d'execution (`logs/pipeline.log`).
+
+Consequence pratique : le code (leger, versionne dans Git) peut tourner depuis n'importe quelle machine ayant acces au reseau MinIO — poste local, serveur Jupyter distant, etc. — sans jamais avoir a copier de donnees.
+
 ## Installation
 
 ```bash
-# Cloner le projet
-cd c:/Users/e_koffie/Documents/Salaires/CNPS_TREATMENT_V2
+git clone <url-du-depot>
+cd CNPS_TREATMENT_V2
 
-# Creer un environnement virtuel
-python -m venv .venv
-.venv/Scripts/activate      # Windows
-# source .venv/bin/activate  # Linux/Mac
+# Environnement virtuel (Python 3.11+, prefer un interpreteur natif —
+# voir la note Apple Silicon plus bas)
+python3 -m venv .venv
+source .venv/bin/activate      # Linux/Mac
+# .venv\Scripts\activate       # Windows
 
-# Installer les dependances
+# Installer le projet et ses dependances
 pip install -e .
 ```
+
+> **Apple Silicon (M1/M2/M3/...)** : si `python3` resout vers un interpreteur x86_64 execute sous Rosetta (verifiable avec `python3 -c "import platform; print(platform.machine())"` — doit afficher `arm64`, pas `x86_64`), Polars peut planter sur les gros volumes (SIGBUS/SIGSEGV). Utiliser un Python natif arm64 (ex: `/opt/homebrew/bin/python3.12`) pour creer le `.venv`.
 
 ### Dependances principales
 
 | Package | Usage |
 |---------|-------|
 | polars | Traitement de donnees (10-100x plus rapide que pandas) |
+| minio | Client de stockage objet — lecture/ecriture de toutes les donnees |
 | scikit-learn | Modeles de classification et regression |
-| statsmodels | Modeles econometriques |
 | scipy | Tests statistiques et distributions |
 | typer + rich | Interface en ligne de commande |
 | loguru | Logging structure |
 | joblib | Parallelisation |
 | xlsxwriter | Export Excel formate |
-| minio | Synchronisation des donnees avec le stockage objet MinIO |
+| openpyxl + fastexcel | Lecture des classeurs Excel bruts |
+| python-dotenv | Chargement des identifiants MinIO depuis `.env` |
 
 ## Configuration
 
-Toute la configuration est centralisee dans deux fichiers YAML :
+### `.env` — identifiants MinIO (jamais versionnes)
 
-| Fichier | Contenu |
-|---------|---------|
-| `config/settings.yaml` | Chemins, parametres de nettoyage, modelisation, parallelisation |
-| `config/dimensions.yaml` | Dimensions analytiques et statistiques a calculer |
+Creer un fichier `.env` a la racine du projet (deja dans `.gitignore`) :
 
-### Modifier les chemins
-
-Dans `config/settings.yaml`, section `paths` :
-
-```yaml
-paths:
-  project_root: "c:/Users/e_koffie/Documents/Salaires/CNPS_TREATMENT_V2"
-  raw_data: "${project_root}/data/raw"
-  # ... autres chemins
+```bash
+MINIO_ACCESS_KEY=votre_access_key
+MINIO_SECRET_KEY=votre_secret_key
 ```
 
-### Modifier les parametres
+Sans ce fichier (ou ces variables d'environnement deja definies), le client utilise `minioadmin` / `minioadmin` par defaut, qui echouera contre un serveur reel.
 
-```yaml
-modeling:
-  n_imputations: 5          # Nombre d'imputations (Rubin)
-  estimation_method: "aipw"  # "ipw", "aipw", ou "tmle"
-  ipw_trim_lower: 0.01      # Troncature des poids
-  ipw_trim_upper: 0.99
-
-cleaning:
-  min_salary: 75000          # Seuil minimum salaire mensuel (FCFA)
-  winsor_lower: 0.01         # Winsorisation (percentiles)
-  winsor_upper: 0.99
-```
-
-## Stockage objet MinIO
-
-Les fichiers de donnees (Excel bruts, Parquet nettoye) ne sont **pas** versionnes dans Git : ils sont trop volumineux (plusieurs Go) et vivent a la place sur un serveur **MinIO** interne. Le code, lui, est le seul element qui transite par GitHub — ce qui permet de le recuperer facilement sur n'importe quelle machine (y compris un serveur Jupyter distant plus puissant) sans avoir a deplacer les donnees.
-
-### Fonctionnement
-
-Le pipeline se synchronise automatiquement avec MinIO a deux moments precis :
-
-| Etape | Module | Sens | Description |
-|-------|--------|------|-------------|
-| Avant `INGEST` | `src/cnps/ingestion/excel_reader.py` | MinIO -> local | Telecharge les fichiers Excel manquants ou modifies depuis le bucket vers `data/raw/` |
-| Apres `CLEAN` | `src/cnps/preparation/cleaner.py` | local -> MinIO | Envoie `data/cleaned/cnps_cleaned.parquet` vers le bucket |
-
-Cette logique est centralisee dans `src/cnps/storage/minio_client.py` (fonctions `download_raw_data` et `upload_cleaned_data`). Si le serveur MinIO n'est pas joignable (hors du reseau interne, VPN non connecte, etc.), le pipeline **n'echoue pas** : il affiche un avertissement dans les logs et continue avec les fichiers locaux deja presents.
-
-### Configuration
-
-Les parametres de connexion (adresse du serveur, bucket, prefixes) sont dans `config/settings.yaml`, section `minio` :
+### `config/settings.yaml` — parametres et prefixes MinIO
 
 ```yaml
 minio:
-  endpoint: "192.168.1.230:31157"
-  bucket: "admindataanstat"
-  raw_prefix: "CNPS/raw_data/"
-  cleaned_prefix: "CNPS/cleaned_data/"
-  secure: false
+  endpoint: "192.168.1.230:30137"        # adresse du serveur MinIO (reseau interne)
+  bucket: "staging"                       # bucket source
+  raw_prefix: "cnps/fichiers_mensuels/"   # ou lire les Excel bruts (MM_YYYY.xlsx)
+  processed_prefix: "cnps/processed_data/" # ou ecrire les Parquets ingeres
+  cleaned_prefix: "cnps/cleaned_data/"     # ou ecrire les bases nettoyees/structurees
+  models_prefix: "cnps/models/"            # ou ecrire les modeles (.pkl)
+  output_prefix: "cnps/output/"            # ou ecrire les exports Excel finaux
+  secure: false                            # HTTP (true si le serveur exige HTTPS)
 ```
 
-Les **identifiants** (access key / secret key) ne sont volontairement **jamais** places dans ce fichier versionne. Ils doivent etre definis via des variables d'environnement avant de lancer le pipeline :
+**Pour changer ou le pipeline lit ses fichiers bruts** : modifier `raw_prefix`.
+**Pour changer ou les resultats sont stockes** : modifier `processed_prefix` / `cleaned_prefix` / `models_prefix` / `output_prefix` independamment.
 
-```bash
-export MINIO_ACCESS_KEY="votre_access_key"
-export MINIO_SECRET_KEY="votre_secret_key"
+> Le prefixe `raw_prefix` peut contenir d'autres fichiers sans rapport avec le pipeline (CSV, sous-dossiers). Le code ne liste jamais ce prefixe en confiance aveugle : il filtre systematiquement par extension `.xlsx` et par le motif de nom `MM_YYYY.xlsx` (regex `ingestion.filename_regex`).
+
+### `config/dimensions.yaml` — dimensions d'analyse et statistiques
+
+Definit les axes de croisement (secteur, age, sexe, commune...) et les statistiques calculees (moyenne, mediane, Gini...) a l'etape 10.
+
+### Autres parametres notables (`settings.yaml`)
+
+```yaml
+modeling:
+  n_imputations: 5           # nombre d'imputations multiples (Rubin)
+  estimation_method: "aipw"  # "ipw" ou "aipw"
+  ipw_trim_lower: 0.01       # troncature des poids (percentiles)
+  ipw_trim_upper: 0.99
+
+estimation:
+  min_cell_size: 30          # suppression des cellules sous ce seuil pondere
+  salary_plausible_range: [75000, 50000000]
 ```
-
-Sans ces variables, le client utilise `minioadmin` / `minioadmin` par defaut.
-
-> Le serveur MinIO tourne sur le reseau interne (`192.168.1.230`) : il faut etre connecte a ce reseau (ou au VPN correspondant) pour que la synchronisation fonctionne. Sur le serveur Jupyter distant, s'assurer que les variables d'environnement `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` y sont aussi definies.
 
 ## Utilisation
 
-### Donnees d'entree
+### Le fil d'execution : 12 etapes numerotees, dependantes entre elles
 
-Placer les fichiers Excel dans `data/raw/` au format `MM_YYYY.xlsx` :
-```
-data/raw/
-  01_2024.xlsx
-  02_2024.xlsx
-  ...
-  11_2025.xlsx
-```
+Chaque etape lit la sortie MinIO de la precedente et ecrit la sienne. **Elles sont sequentiellement dependantes** : lancer l'etape 5 sans avoir jamais lance l'etape 4 echoue (fichier source introuvable sur MinIO).
 
-### Commandes
+| # | Fichier | Fonction | Lit (MinIO) | Ecrit (MinIO) |
+|---|---------|----------|-------------|----------------|
+| 01 | `01_lecture_fichiers.py` | `lire_fichiers` | `raw_prefix/*.xlsx` (filtre `MM_YYYY.xlsx`) | `processed_prefix/MM_YYYY.parquet` + `.file_registry.json` |
+| 02 | `02_harmonisation_types.py` | `harmoniser_types` | `processed_prefix/*.parquet` | memes fichiers, types corriges (ecrasement) |
+| 03 | `03_nettoyage_donnees.py` | `nettoyer_donnees` | `processed_prefix/*.parquet` (tous) | `cleaned_prefix/cnps_cleaned.parquet` |
+| 04 | `04_base_individus.py` | `construire_base_individus` | `cleaned_prefix/cnps_cleaned.parquet` | `cleaned_prefix/individual_base.parquet` |
+| 05 | `05_base_entreprises.py` | `construire_base_entreprises` | `cleaned_prefix/individual_base.parquet` | `cleaned_prefix/firm_base.parquet` |
+| 06 | `06_base_analytique.py` | `construire_base_analytique` | `cleaned_prefix/{individual_base,firm_base}.parquet` | `cleaned_prefix/analytical_base.parquet` |
+| 07 | `07_modele_declaration.py` | `ajuster_modele_declaration` | `cleaned_prefix/firm_base.parquet` | memes fichier (+ `W_JT`, `P_HAT_JT`) + `models_prefix/declaration_model.pkl` |
+| 08 | `08_imputation_salaires.py` | `imputer_salaires` | `cleaned_prefix/firm_base.parquet` | `cleaned_prefix/firm_base_imputed.parquet` + `models_prefix/imputation_model.pkl` |
+| 09 | `09_ponderation_finale.py` | `calculer_poids_finaux` | `cleaned_prefix/analytical_base.parquet` | meme fichier (+ `W_FINAL`) |
+| 10 | `10_estimation_indicateurs.py` | `estimer_indicateurs` | `cleaned_prefix/analytical_base.parquet` (+ `firm_base_imputed.parquet` si present) | **rien** — DataFrame en memoire |
+| 11 | `11_validation_qualite.py` | `valider_tout` | `cleaned_prefix/*.parquet`, `models_prefix/*.pkl` | **rien** — rapport en memoire |
+| 12 | `12_export_excel.py` | `exporter_indicateurs` | resultats de l'etape 10 (en memoire) | `output_prefix/indicateurs_cnps.xlsx` |
+
+Hors sequence numerotee (outils a la demande) :
+
+| Fichier | Fonction | Lit | Ecrit |
+|---------|----------|-----|-------|
+| `audit_qualite.py` | `executer_audit` | `processed_prefix/*.parquet` (ou prefixe custom via `--input`) | `output_prefix/audit_fichiers_cnps_<horodatage>.xlsx` |
+| `storage.py` | primitives `read_*`/`write_*` | — | — (utilise par toutes les etapes ci-dessus) |
+
+### Commandes CLI
 
 ```bash
-# Pipeline complet (ingestion -> export)
-python run.py run
+# --- Pipeline complet ou par plage d'etapes ---
+python run.py run                                          # les 12 etapes
+python run.py run --from NETTOYAGE_DONNEES --to EXPORT_EXCEL
+python run.py run --verbose                                 # logs detailles
 
-# Avec mode verbose
-python run.py run --verbose
+# --- Raccourcis (groupes d'etapes) ---
+python run.py ingest      # etapes 01-02 : Excel -> Parquet + harmonisation
+python run.py clean       # etapes 03-06 : nettoyage + bases structurees
+python run.py model       # etapes 07-09 : declaration + imputation + ponderation
+python run.py estimate    # etapes 10+12 : estimation + export Excel
 
-# Stages specifiques
-python run.py run --from CLEAN --to ESTIMATION
+# --- Outils independants ---
+python run.py audit                                          # 8 controles qualite
+python run.py audit --input cnps/cleaned_data/ --salary-var SALAIRE_BRUT_MENS
+python run.py validate                                       # controles donnees/modeles
 
-# Ingestion seule (Excel -> Parquet)
-python run.py ingest
-
-# Nettoyage et structuration
-python run.py clean
-
-# Modelisation (declaration + imputation + ponderation)
-python run.py model
-
-# Estimation et export Excel
-python run.py estimate
-
-# Audit qualite des donnees (rapport Excel avec 6 controles)
-python run.py audit
-
-# Audit sur un dossier specifique avec variables personnalisees
-python run.py audit --input data/cleaned --salary-var SALAIRE_BRUT_MENS --id-var ID_INDIV
-
-# Validation (donnees + modeles + resultats)
-python run.py validate
-
-# Voir la configuration active
-python run.py config
-
-# --- Reset / Reinitialisation ---
-
-# Reinitialiser completement (ne garder que les donnees brutes)
-python run.py reset origin
-
-# Apercu de ce qui sera supprime (sans rien supprimer)
-python run.py reset origin --dry-run
-
-# Sans demande de confirmation
-python run.py reset origin --yes
-
-# Garder les logs et sessions lors du reset
-python run.py reset origin --keep-logs
-
-# Reinitialiser a un stage specifique (supprime tout en aval)
-python run.py reset stage INGEST         # Garder processed/, supprimer le reste
-python run.py reset stage CLEAN          # Garder cleaned base, supprimer structuration+
-python run.py reset stage ANALYTICAL_BASE # Garder les bases, supprimer modeles+
-python run.py reset stage WEIGHTING      # Garder modeles, supprimer export
-python run.py reset stage CLEAN --dry-run # Apercu sans suppression
+# --- Configuration ---
+python run.py config      # affiche bucket, prefixes, parametres actifs
 ```
 
-### Niveaux de reset
-
-| Reset vers | Conserve | Supprime |
-|------------|----------|----------|
-| `origin` | `data/raw/`, code source, config | `data/processed/`, `data/cleaned/`, `data/output/`, `models/`, `logs/`, `sessions/` |
-| `INGEST` | + parquets ingeres | cleaned, modeles, output |
-| `CLEAN` | + base nettoyee | bases structurees, modeles, output |
-| `INDIVIDUAL_BASE` | + base individuelle | firm_base, analytical_base, modeles, output |
-| `FIRM_BASE` | + panel entreprise-mois | analytical_base, modeles, output |
-| `ANALYTICAL_BASE` | + toutes les bases structurees | modeles, poids, output |
-| `DECLARATION_MODEL` | + modele de propension | modele d'imputation, estimation, export |
-| `IMPUTATION` | + modele d'imputation | poids finaux, estimation, export |
-| `WEIGHTING` | + poids finaux (`W_FINAL`) | estimation, export |
-
-> ⚠️ **Incoherence connue** : `reset.py` cible des fichiers `firm_base_propensity.parquet` et `analytical_base_weighted.parquet` pour les stages `DECLARATION_MODEL` et `WEIGHTING`. Ces fichiers ne sont **jamais crees** par le pipeline reel : `declaration_model.py` et `weighting.py` ecrivent leurs resultats **directement dans** `firm_base.parquet` et `analytical_base.parquet` (colonnes ajoutees en place). Consequence : `python run.py reset stage DECLARATION_MODEL` et `reset stage WEIGHTING` ne suppriment pas reellement les colonnes `W_JT`/`P_HAT_JT`/`W_FINAL` deja calculees — seuls les `.pkl` de `models/` sont retires. A corriger dans `reset.py` avant de se fier a ces deux niveaux de reset.
-
-### Stages du pipeline
-
-```
- data/raw/*.xlsx
- (01_2024.xlsx, 02_2024.xlsx, ...)
-       |
-       |  [1. INGEST]  ingestion/excel_reader.py -> ingest()
-       v
- data/processed/MM_YYYY.parquet
- (01_2024.parquet, 02_2024.parquet, ...)
-       |
-       |  [2. HARMONIZE]  preparation/type_harmonizer.py -> harmonize_types()
-       v
- data/processed/*.parquet  (types corriges en place)
-       |
-       |  [3. CLEAN]  preparation/cleaner.py -> clean()
-       v
- data/cleaned/cnps_cleaned.parquet
-       |
-       +------------------------------------------+
-       |                                          |
-       |  [4. INDIVIDUAL_BASE]                    |
-       |  structuring/individual_base.py          |
-       |  -> build_individual_base()              |
-       v                                          |
- data/cleaned/individual_base.parquet             |
-       |                                          |
-       |  [5. FIRM_BASE]                          |
-       |  structuring/firm_base.py                |
-       |  -> build_firm_base()                    |
-       v                                          |
- data/cleaned/firm_base.parquet                   |
-       |                                          |
-       +------------------+-----------------------+
-       |                  |
-       |  [6. ANALYTICAL_BASE]
-       |  structuring/analytical_base.py
-       |  -> build_analytical_base()
-       v
- data/cleaned/analytical_base.parquet
-       |
-       |            +-- data/cleaned/firm_base.parquet
-       |            |
-       |            |  [7. DECLARATION_MODEL]
-       |            |  modeling/declaration_model.py
-       |            |  -> fit_declaration_model()
-       |            v
-       |     data/cleaned/firm_base.parquet  (+ W_JT, P_HAT_JT)
-       |     models/declaration_model.pkl
-       |            |
-       |            |  [8. IMPUTATION]
-       |            |  modeling/imputation.py
-       |            |  -> impute_firm_salaries()
-       |            v
-       |     data/cleaned/firm_base_imputed.parquet
-       |     models/imputation_model.pkl
-       |
-       |  [9. WEIGHTING]
-       |  modeling/weighting.py
-       |  -> compute_final_weights()
-       v
- data/cleaned/analytical_base.parquet  (+ W_FINAL)
-       |
-       |  [10. ESTIMATION]
-       |  estimation/estimator.py -> estimate_all()
-       v
- (DataFrame en memoire : indicateurs par dimension)
-       |
-       +------------------------------------------+
-       |                                          |
-       |  [11. VALIDATION]                        |  [12. EXPORT]
-       |  diagnostics/validation.py               |  export/excel_export.py
-       |  -> run_all_validations()                |  -> export_indicators()
-       v                                          v
- data/output/rapport_validation.xlsx     data/output/indicateurs_cnps.xlsx
-```
+Noms d'etape valides pour `--from`/`--to` : `LECTURE_FICHIERS`, `HARMONISATION_TYPES`, `NETTOYAGE_DONNEES`, `BASE_INDIVIDUS`, `BASE_ENTREPRISES`, `BASE_ANALYTIQUE`, `MODELE_DECLARATION`, `IMPUTATION_SALAIRES`, `PONDERATION_FINALE`, `ESTIMATION_INDICATEURS`, `VALIDATION_QUALITE`, `EXPORT_EXCEL`.
 
 ## Structure du projet
+
+Le pipeline est organise en fichiers **a plat**, numerotes dans l'ordre d'execution : ouvrir `src/cnps/` dans un explorateur de fichiers donne directement la sequence du traitement, sans avoir a naviguer dans des sous-dossiers.
 
 ```
 CNPS_TREATMENT_V2/
 |-- config/
-|   |-- settings.yaml          # Configuration principale
-|   |-- dimensions.yaml        # Dimensions et statistiques
+|   |-- settings.yaml            # bucket/prefixes MinIO, parametres pipeline
+|   |-- dimensions.yaml          # dimensions d'analyse et statistiques
 |-- src/cnps/
-|   |-- __init__.py
-|   |-- config.py              # Chargement configuration
-|   |-- cli.py                 # Interface ligne de commande
-|   |-- pipeline.py            # Orchestrateur du pipeline
-|   |-- ingestion/
-|   |   |-- excel_reader.py    # Excel -> Parquet
-|   |-- preparation/
-|   |   |-- type_harmonizer.py # Harmonisation des types
-|   |   |-- cleaner.py         # Nettoyage et enrichissement
-|   |-- structuring/
-|   |   |-- individual_base.py # Base individuelle
-|   |   |-- firm_base.py       # Panel entreprise-mois
-|   |   |-- analytical_base.py # Base analytique fusionnee
-|   |-- modeling/
-|   |   |-- declaration_model.py  # Logit (propension)
-|   |   |-- imputation.py        # Imputation multiple
-|   |   |-- weighting.py         # IPW / AIPW
-|   |-- estimation/
-|   |   |-- weighted_stats.py     # Estimateurs ponderes
-|   |   |-- confidence_intervals.py # Regles de Rubin
-|   |   |-- estimator.py         # Moteur d'estimation
-|   |-- diagnostics/
-|   |   |-- validation.py        # Controles qualite
-|   |-- export/
-|   |   |-- excel_export.py      # Export Excel formate
-|   |-- storage/
-|       |-- minio_client.py      # Synchronisation avec MinIO
-|-- data/
-|   |-- raw/                   # Fichiers Excel source
-|   |-- processed/             # Parquet intermediaires
-|   |-- cleaned/               # Donnees nettoyees
-|   |-- output/                # Indicateurs finaux
+|   |-- config.py                # chargement de la configuration (YAML + .env)
+|   |-- storage.py                # primitives de lecture/ecriture MinIO
+|   |-- pipeline.py               # orchestrateur (enchaine les etapes 01-12)
+|   |-- cli.py                    # commandes CLI (typer)
+|   |-- 01_lecture_fichiers.py    # Excel -> Parquet
+|   |-- 02_harmonisation_types.py # types uniformes (dates, numeriques, ID)
+|   |-- 03_nettoyage_donnees.py   # concatenation + variables derivees
+|   |-- 04_base_individus.py      # vue par salarie
+|   |-- 05_base_entreprises.py    # panel entreprise-mois equilibre
+|   |-- 06_base_analytique.py     # fusion individus + entreprises
+|   |-- 07_modele_declaration.py  # score de propension (logit) + poids IPW
+|   |-- 08_imputation_salaires.py # imputation multiple (salaires manquants)
+|   |-- 09_ponderation_finale.py  # poids final IPW/AIPW
+|   |-- 10_estimation_indicateurs.py # estimateurs ponderes + regles de Rubin
+|   |-- 11_validation_qualite.py  # controles qualite donnees/modeles/resultats
+|   |-- 12_export_excel.py        # export Excel formate
+|   |-- audit_qualite.py          # audit qualite a la demande (8 controles)
 |-- docs/
-|   |-- methodology.md         # Note methodologique detaillee
-|-- models/                    # Modeles sauvegardes (.pkl)
-|-- logs/                      # Logs d'execution
-|-- sessions/                  # Historique des sessions
-|-- run.py                     # Point d'entree
-|-- reset.py                   # Reinitialisation du projet
-|-- pyproject.toml             # Dependances et configuration
+|   |-- methodology.md            # note methodologique detaillee (26 references)
+|-- logs/                         # logs d'execution (local, non versionne)
+|-- run.py                        # point d'entree (python run.py <commande>)
+|-- pyproject.toml                # dependances et configuration du paquet
 |-- README.md
 ```
 
-## Sorties
+> Les fichiers `NN_nom.py` (commencant par un chiffre) ne sont pas des identifiants Python valides pour un `import` classique. `pipeline.py` et `cli.py` les chargent via `importlib.import_module("cnps.NN_nom")`.
 
-| Fichier | Contenu |
+## Sorties finales
+
+| Fichier (sur MinIO, `output_prefix`) | Contenu |
 |---------|---------|
-| `data/output/indicateurs_cnps.xlsx` | Indicateurs par dimension (un onglet par dimension) |
-| `data/output/rapport_validation.xlsx` | Rapport de validation |
-| `logs/pipeline.log` | Log detaille de l'execution |
-| `sessions/{ID}/metadata.json` | Metadata de session |
+| `indicateurs_cnps.xlsx` | Indicateurs par dimension (un onglet par dimension) |
+| `rapport_validation.xlsx` | Rapport de validation (si exporte via `export_validation_report`) |
+| `audit_fichiers_cnps_<horodatage>.xlsx` | Rapport d'audit qualite (8 controles) |
+| `sessions/{ID}/metadata.json` | Metadonnees de chaque execution du pipeline (duree, statut par etape) |
 
-## Differences avec la v1
-
-| Aspect | v1 (R) | v2 (Python) |
-|--------|--------|-------------|
-| Langage | R + dplyr | Python + Polars |
-| Format intermediaire | Stata .dta | Parquet (zstd) |
-| Performance | ~45s / 1M lignes | ~3s / 1M lignes |
-| Estimation | IPW pur | AIPW (doublement robuste) |
-| Configuration | Scripts R | YAML versionnable |
-| Interface | source() dans R | CLI avec Typer |
-| Parallelisation | Non | Joblib + Polars multi-thread |
-| Logging | print() | Loguru structure |
+En local : `logs/pipeline.log` (journal detaille, non versionne).
 
 ## References cles
 
@@ -361,4 +211,4 @@ CNPS_TREATMENT_V2/
 - Rubin (1987). *Multiple Imputation for Nonresponse in Surveys.* Wiley.
 - Cole & Hernan (2008). *AJE*, 168(6).
 
-Voir [docs/methodology.md](docs/methodology.md) pour la bibliographie complete (26 references).
+Voir [docs/methodology.md](docs/methodology.md) pour la bibliographie complete.
