@@ -171,11 +171,11 @@ def estimate(
 @app.command()
 def audit(
     settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
-    input_folder: Optional[Path] = typer.Option(
-        None, "--input", "-i", help="Folder with parquet files to audit (default: processed_data)",
+    input_prefix: Optional[str] = typer.Option(
+        None, "--input", "-i", help="MinIO prefix with parquet files to audit (default: processed_prefix)",
     ),
-    output_folder: Optional[Path] = typer.Option(
-        None, "--output", "-o", help="Output folder for the audit Excel (default: output)",
+    output_prefix: Optional[str] = typer.Option(
+        None, "--output", "-o", help="MinIO prefix for the audit Excel (default: output_prefix)",
     ),
     salary_var: str = typer.Option("SALAIRE_BRUT", "--salary-var", help="Column for outlier detection"),
     id_var: str = typer.Option("ID_INDIV", "--id-var", help="Column for uniqueness check"),
@@ -188,8 +188,8 @@ def audit(
     from cnps.diagnostics.audit import run_audit
     out = run_audit(
         cfg,
-        input_folder=input_folder,
-        output_folder=output_folder,
+        input_prefix=input_prefix,
+        output_prefix=output_prefix,
         salary_var=salary_var,
         id_var=id_var,
     )
