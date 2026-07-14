@@ -49,13 +49,13 @@ Van der Laan, M. J. & Rose, S. (2011). *Targeted Learning*. Springer.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig
+from cnps.storage import read_parquet, write_parquet
+from cnps.storage.minio_client import object_exists
 
 
 def _compute_ipw_weights(
@@ -158,7 +158,7 @@ def _compute_aipw_weights(
 # Public API
 # ---------------------------------------------------------------------------
 
-def compute_final_weights(cfg: PipelineConfig) -> Path:
+def compute_final_weights(cfg: PipelineConfig) -> str:
     """
     Compute final analytical weights using the configured method.
 
@@ -172,16 +172,15 @@ def compute_final_weights(cfg: PipelineConfig) -> Path:
 
     Returns
     -------
-    Path
-        Path to the updated analytical base with final weights.
+    str
+        Object name of the updated analytical base with final weights.
     """
-    analytical_path = cfg.paths.cleaned_data / "analytical_base.parquet"
-    firm_path = cfg.paths.cleaned_data / "firm_base.parquet"
+    analytical_object = f"{cfg.minio.cleaned_prefix}analytical_base.parquet"
 
-    if not analytical_path.exists():
-        raise FileNotFoundError(f"Analytical base not found: {analytical_path}")
+    if not object_exists(cfg.minio, analytical_object):
+        raise FileNotFoundError(f"Analytical base not found: {analytical_object}")
 
-    df = pl.read_parquet(analytical_path)
+    df = read_parquet(cfg.minio, analytical_object)
     method = cfg.modeling.estimation_method
 
     logger.info("Computing final weights using method: {}", method)
@@ -228,8 +227,8 @@ def compute_final_weights(cfg: PipelineConfig) -> Path:
             .alias("W_FINAL")
         )
 
-    df.write_parquet(analytical_path, compression="zstd")
+    write_parquet(cfg.minio, analytical_object, df)
     logger.info("Final weights computed: mean={:.3f}, std={:.3f}",
                 df["W_FINAL"].mean(), df["W_FINAL"].std())
 
-    return analytical_path
+    return analytical_object

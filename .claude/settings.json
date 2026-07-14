@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(.venv/bin/python -c ' *)",
-      "Bash(.venv/bin/python /private/tmp/claude-501/-Users-macbookair-Desktop-CAE-Salaires-CNPS-TREATMENT-V2/0e379398-be35-4bb0-bdd9-2a45638d52c0/scratchpad/bootstrap_minio.py)"
+      "Bash(.venv/bin/python /private/tmp/claude-501/-Users-macbookair-Desktop-CAE-Salaires-CNPS-TREATMENT-V2/0e379398-be35-4bb0-bdd9-2a45638d52c0/scratchpad/bootstrap_minio.py)",
+      "Bash(.venv/bin/jupyter nbconvert *)",
+      "Bash(env)",
+      "Bash(mc alias *)",
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//usr/local/bin/**)",
+      "Bash(brew --prefix)",
+      "Bash(/opt/homebrew/bin/python3.12 -c \"import platform; print\\(platform.machine\\(\\)\\)\")"
     ]
   }
 }

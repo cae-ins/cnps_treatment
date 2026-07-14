@@ -17,6 +17,9 @@ logs/
 sessions/
 models/
 
+# Secrets
+.env
+
 # OS
 .DS_Store
 

@@ -21,13 +21,13 @@ Heeringa, S. G., West, B. T. & Berglund, P. A. (2017). *Applied Survey
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig, DimensionDef, StatDef
+from cnps.storage import read_parquet
+from cnps.storage.minio_client import object_exists
 from cnps.estimation.weighted_stats import compute_statistic, weighted_variance
 from cnps.estimation.confidence_intervals import combine_rubin, RubinResult
 
@@ -121,8 +121,8 @@ def estimate_all(cfg: PipelineConfig) -> pl.DataFrame:
     pl.DataFrame
         Results with columns: dimension, group, + one column per statistic.
     """
-    analytical_path = cfg.paths.cleaned_data / "analytical_base.parquet"
-    imputed_path = cfg.paths.cleaned_data / "firm_base_imputed.parquet"
+    analytical_object = f"{cfg.minio.cleaned_prefix}analytical_base.parquet"
+    imputed_object = f"{cfg.minio.cleaned_prefix}firm_base_imputed.parquet"
 
     salary_col = "SALAIRE_BRUT_MENS" if True else "SALAIRE_BRUT"  # Default
     weight_col = "W_FINAL"
@@ -131,20 +131,20 @@ def estimate_all(cfg: PipelineConfig) -> pl.DataFrame:
     enabled_dims = [d for d in cfg.dimensions if d.enabled]
 
     # Check for multiple imputations
-    has_imputations = imputed_path.exists()
+    has_imputations = object_exists(cfg.minio, imputed_object)
 
     if has_imputations:
         logger.info("Multiple imputations detected, using Rubin's combination rules")
         return _estimate_with_imputations(
-            cfg, imputed_path, analytical_path,
+            cfg, imputed_object, analytical_object,
             salary_col, weight_col, min_cell, statistics, enabled_dims,
         )
 
     # Single dataset estimation
-    if not analytical_path.exists():
-        raise FileNotFoundError(f"Analytical base not found: {analytical_path}")
+    if not object_exists(cfg.minio, analytical_object):
+        raise FileNotFoundError(f"Analytical base not found: {analytical_object}")
 
-    df = pl.read_parquet(analytical_path)
+    df = read_parquet(cfg.minio, analytical_object)
 
     # Check salary column availability
     if salary_col not in df.columns:
@@ -168,8 +168,8 @@ def estimate_all(cfg: PipelineConfig) -> pl.DataFrame:
 
 def _estimate_with_imputations(
     cfg: PipelineConfig,
-    imputed_path: Path,
-    analytical_path: Path,
+    imputed_object: str,
+    analytical_object: str,
     salary_col: str,
     weight_col: str,
     min_cell: int,
@@ -177,7 +177,7 @@ def _estimate_with_imputations(
     enabled_dims: list[DimensionDef],
 ) -> pl.DataFrame:
     """Estimate with Rubin's combination across imputations."""
-    imputed = pl.read_parquet(imputed_path)
+    imputed = read_parquet(cfg.minio, imputed_object)
 
     if "IMPUTATION_ID" not in imputed.columns:
         logger.warning("No IMPUTATION_ID found, treating as single imputation")

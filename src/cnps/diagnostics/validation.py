@@ -19,15 +19,15 @@ Steyerberg, E. W. et al. (2010). Assessing the performance of prediction
 
 from __future__ import annotations
 
-import pickle
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig
+from cnps.storage import read_parquet, read_pickle
+from cnps.storage.minio_client import object_exists
 
 
 @dataclass
@@ -72,15 +72,15 @@ class ValidationReport:
 def validate_data(cfg: PipelineConfig) -> ValidationReport:
     """Run data quality checks on the cleaned dataset."""
     report = ValidationReport()
-    cleaned_path = cfg.paths.cleaned_data / "cnps_cleaned.parquet"
+    cleaned_object = f"{cfg.minio.cleaned_prefix}cnps_cleaned.parquet"
 
-    if not cleaned_path.exists():
+    if not object_exists(cfg.minio, cleaned_object):
         report.issues.append(ValidationIssue(
-            "ERROR", "data", "file_exists", f"Cleaned data not found: {cleaned_path}",
+            "ERROR", "data", "file_exists", f"Cleaned data not found: {cleaned_object}",
         ))
         return report
 
-    df = pl.read_parquet(cleaned_path)
+    df = read_parquet(cfg.minio, cleaned_object)
 
     # Check row count
     if df.height == 0:
@@ -153,10 +153,9 @@ def validate_models(cfg: PipelineConfig) -> ValidationReport:
     report = ValidationReport()
 
     # Declaration model
-    decl_path = cfg.paths.models / "declaration_model.pkl"
-    if decl_path.exists():
-        with open(decl_path, "rb") as f:
-            model_data = pickle.load(f)
+    decl_object = f"{cfg.minio.models_prefix}declaration_model.pkl"
+    if object_exists(cfg.minio, decl_object):
+        model_data = read_pickle(cfg.minio, decl_object)
 
         auc = model_data.get("auc", 0)
         if auc < cfg.modeling.min_auc:
@@ -176,10 +175,9 @@ def validate_models(cfg: PipelineConfig) -> ValidationReport:
         ))
 
     # Imputation model
-    imp_path = cfg.paths.models / "imputation_model.pkl"
-    if imp_path.exists():
-        with open(imp_path, "rb") as f:
-            model_data = pickle.load(f)
+    imp_object = f"{cfg.minio.models_prefix}imputation_model.pkl"
+    if object_exists(cfg.minio, imp_object):
+        model_data = read_pickle(cfg.minio, imp_object)
 
         r2 = model_data.get("r_squared", 0)
         report.issues.append(ValidationIssue(
@@ -193,9 +191,9 @@ def validate_models(cfg: PipelineConfig) -> ValidationReport:
         ))
 
     # Weight distribution
-    firm_path = cfg.paths.cleaned_data / "firm_base.parquet"
-    if firm_path.exists():
-        df = pl.read_parquet(firm_path)
+    firm_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
+    if object_exists(cfg.minio, firm_object):
+        df = read_parquet(cfg.minio, firm_object)
         if "W_JT" in df.columns:
             w = df["W_JT"].drop_nulls().to_numpy()
             cv = float(np.std(w) / np.mean(w)) if np.mean(w) > 0 else np.inf

@@ -34,9 +34,6 @@ White, I. R., Royston, P. & Wood, A. M. (2011). Multiple imputation using
 
 from __future__ import annotations
 
-import pickle
-from pathlib import Path
-
 import numpy as np
 import polars as pl
 from loguru import logger
@@ -46,6 +43,8 @@ from sklearn.pipeline import Pipeline as SKPipeline
 from sklearn.preprocessing import OneHotEncoder
 
 from cnps.config import PipelineConfig
+from cnps.storage import read_parquet, write_parquet, write_pickle
+from cnps.storage.minio_client import object_exists
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +104,7 @@ def _prepare_imputation_data(
 # Public API
 # ---------------------------------------------------------------------------
 
-def impute_firm_salaries(cfg: PipelineConfig) -> Path:
+def impute_firm_salaries(cfg: PipelineConfig) -> str:
     """
     Generate M multiple imputations for non-declaring firm salaries.
 
@@ -116,14 +115,14 @@ def impute_firm_salaries(cfg: PipelineConfig) -> Path:
 
     Returns
     -------
-    Path
-        Path to the imputed firm base (long format with ``imputation_id``).
+    str
+        Object name of the imputed firm base (long format with ``imputation_id``).
     """
-    firm_path = cfg.paths.cleaned_data / "firm_base.parquet"
-    if not firm_path.exists():
-        raise FileNotFoundError(f"Firm base not found: {firm_path}")
+    firm_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
+    if not object_exists(cfg.minio, firm_object):
+        raise FileNotFoundError(f"Firm base not found: {firm_object}")
 
-    df = pl.read_parquet(firm_path)
+    df = read_parquet(cfg.minio, firm_object)
     M = cfg.modeling.n_imputations
     rng = np.random.default_rng(cfg.modeling.random_seed)
 
@@ -133,9 +132,9 @@ def impute_firm_salaries(cfg: PipelineConfig) -> Path:
         logger.info("No non-declaring firms to impute.")
         # Write with imputation_id = 0 for compatibility
         df = df.with_columns(pl.lit(0).cast(pl.Int32).alias("IMPUTATION_ID"))
-        out_path = cfg.paths.cleaned_data / "firm_base_imputed.parquet"
-        df.write_parquet(out_path, compression="zstd")
-        return out_path
+        out_object = f"{cfg.minio.cleaned_prefix}firm_base_imputed.parquet"
+        write_parquet(cfg.minio, out_object, df)
+        return out_object
 
     # --- Fit OLS on log(salary) ---
     features = cat_feats + num_feats
@@ -201,16 +200,15 @@ def impute_firm_salaries(cfg: PipelineConfig) -> Path:
 
     result = pl.concat(all_frames, how="diagonal")
 
-    out_path = cfg.paths.cleaned_data / "firm_base_imputed.parquet"
-    result.write_parquet(out_path, compression="zstd")
-    logger.info("Imputed firm base: {} rows (M={}) -> {}", result.height, M, out_path)
+    out_object = f"{cfg.minio.cleaned_prefix}firm_base_imputed.parquet"
+    write_parquet(cfg.minio, out_object, result)
+    logger.info("Imputed firm base: {} rows (M={}) -> {}", result.height, M, out_object)
 
     # Save model
-    model_path = cfg.paths.models / "imputation_model.pkl"
-    with open(model_path, "wb") as f:
-        pickle.dump({
-            "model": model, "sigma": sigma_hat, "r_squared": r_squared,
-            "features": features,
-        }, f)
+    model_object = f"{cfg.minio.models_prefix}imputation_model.pkl"
+    write_pickle(cfg.minio, model_object, {
+        "model": model, "sigma": sigma_hat, "r_squared": r_squared,
+        "features": features,
+    })
 
-    return out_path
+    return out_object

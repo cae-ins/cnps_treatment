@@ -16,15 +16,14 @@ Wooldridge, J. M. (2010). *Econometric Analysis of Cross Section and Panel
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig
+from cnps.storage import read_parquet, write_parquet
+from cnps.storage.minio_client import object_exists
 
 
-def build_individual_base(cfg: PipelineConfig) -> Path:
+def build_individual_base(cfg: PipelineConfig) -> str:
     """
     Build the individual-level base from cleaned data.
 
@@ -43,14 +42,14 @@ def build_individual_base(cfg: PipelineConfig) -> Path:
 
     Returns
     -------
-    Path
-        Path to the individual base Parquet file.
+    str
+        Object name of the individual base Parquet file on MinIO.
     """
-    cleaned_path = cfg.paths.cleaned_data / "cnps_cleaned.parquet"
-    if not cleaned_path.exists():
-        raise FileNotFoundError(f"Cleaned data not found: {cleaned_path}")
+    cleaned_object = f"{cfg.minio.cleaned_prefix}cnps_cleaned.parquet"
+    if not object_exists(cfg.minio, cleaned_object):
+        raise FileNotFoundError(f"Cleaned data not found: {cleaned_object}")
 
-    df = pl.read_parquet(cleaned_path)
+    df = read_parquet(cfg.minio, cleaned_object)
     logger.info("Building individual base from {} rows", df.height)
 
     # Observation ID
@@ -82,8 +81,8 @@ def build_individual_base(cfg: PipelineConfig) -> Path:
                     ((pl.col("MOIS") - 1) // 6 + 1).cast(pl.Int32).alias(col)
                 )
 
-    out_path = cfg.paths.cleaned_data / "individual_base.parquet"
-    df.write_parquet(out_path, compression="zstd")
-    logger.info("Individual base: {} rows, {} cols -> {}", df.height, df.width, out_path)
+    out_object = f"{cfg.minio.cleaned_prefix}individual_base.parquet"
+    write_parquet(cfg.minio, out_object, df)
+    logger.info("Individual base: {} rows, {} cols -> {}", df.height, df.width, out_object)
 
-    return out_path
+    return out_object

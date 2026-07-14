@@ -24,14 +24,14 @@ Dixon, W. J. (1960). Simplified estimation from censored normal samples.
 
 from __future__ import annotations
 
+import re
 from datetime import date
-from pathlib import Path
 
 import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig
-from cnps.storage import upload_cleaned_data
+from cnps.storage import list_objects, read_parquet, write_parquet
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +116,7 @@ def _winsorise(df: pl.DataFrame, col: str, lower: float, upper: float) -> pl.Dat
 # Public API
 # ---------------------------------------------------------------------------
 
-def clean(cfg: PipelineConfig) -> Path:
+def clean(cfg: PipelineConfig) -> str:
     """
     Clean and enrich the concatenated dataset.
 
@@ -136,18 +136,18 @@ def clean(cfg: PipelineConfig) -> Path:
 
     Returns
     -------
-    Path
-        Path to the cleaned Parquet file.
+    str
+        Object name of the cleaned Parquet file on MinIO.
     """
-    processed_dir = cfg.paths.processed_data
-    files = sorted(processed_dir.glob("*.parquet"))
+    all_objects = list_objects(cfg.minio, cfg.minio.processed_prefix, recursive=False)
+    files = sorted(obj for obj in all_objects if re.search(r"\.parquet$", obj))
 
     if not files:
-        raise FileNotFoundError(f"No Parquet files in {processed_dir}")
+        raise FileNotFoundError(f"No Parquet files under {cfg.minio.processed_prefix}")
 
     # --- 1. Concatenate ---
     logger.info("Concatenating {} monthly files", len(files))
-    frames = [pl.read_parquet(f) for f in files]
+    frames = [read_parquet(cfg.minio, f) for f in files]
 
     # Align schemas (union of columns)
     all_cols = dict.fromkeys(col for f in frames for col in f.columns)
@@ -245,13 +245,8 @@ def clean(cfg: PipelineConfig) -> Path:
         )
 
     # --- 3. Write ---
-    out_path = cfg.paths.cleaned_data / "cnps_cleaned.parquet"
-    df.write_parquet(out_path, compression="zstd")
-    logger.info("Cleaned data written: {} ({} rows, {} cols)", out_path, df.height, df.width)
+    out_object = f"{cfg.minio.cleaned_prefix}cnps_cleaned.parquet"
+    write_parquet(cfg.minio, out_object, df)
+    logger.info("Cleaned data written: {} ({} rows, {} cols)", out_object, df.height, df.width)
 
-    try:
-        upload_cleaned_data(cfg.minio, out_path)
-    except Exception as exc:
-        logger.warning("MinIO upload failed, cleaned data kept locally only: {}", exc)
-
-    return out_path
+    return out_object

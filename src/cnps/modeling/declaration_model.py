@@ -42,9 +42,6 @@ Cole, S. R. & Hernan, M. A. (2008). Constructing inverse probability weights
 
 from __future__ import annotations
 
-import pickle
-from pathlib import Path
-
 import numpy as np
 import polars as pl
 from loguru import logger
@@ -55,6 +52,8 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline as SKPipeline
 
 from cnps.config import PipelineConfig
+from cnps.storage import read_parquet, write_parquet, write_pickle
+from cnps.storage.minio_client import object_exists
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +110,7 @@ def _prepare_features(
 # Public API
 # ---------------------------------------------------------------------------
 
-def fit_declaration_model(cfg: PipelineConfig) -> Path:
+def fit_declaration_model(cfg: PipelineConfig) -> str:
     """
     Fit the firm-level declaration model and compute IPW weights.
 
@@ -132,14 +131,14 @@ def fit_declaration_model(cfg: PipelineConfig) -> Path:
 
     Returns
     -------
-    Path
-        Path to the updated firm base with IPW weights.
+    str
+        Object name of the updated firm base with IPW weights.
     """
-    firm_path = cfg.paths.cleaned_data / "firm_base.parquet"
-    if not firm_path.exists():
-        raise FileNotFoundError(f"Firm base not found: {firm_path}")
+    firm_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
+    if not object_exists(cfg.minio, firm_object):
+        raise FileNotFoundError(f"Firm base not found: {firm_object}")
 
-    df = pl.read_parquet(firm_path)
+    df = read_parquet(cfg.minio, firm_object)
     logger.info("Fitting declaration model on {} firm-period records", df.height)
 
     # --- Prepare features ---
@@ -208,7 +207,7 @@ def fit_declaration_model(cfg: PipelineConfig) -> Path:
     if "NUMERO_EMPLOYEUR" in df_model.columns and "PERIOD" in df_model.columns:
         join_cols = ["NUMERO_EMPLOYEUR", "PERIOD"]
         weights_df = df_model.select(join_cols + ["W_JT", "P_HAT_JT"])
-        df_orig = pl.read_parquet(firm_path).drop(["W_JT"], strict=False)
+        df_orig = read_parquet(cfg.minio, firm_object).drop(["W_JT"], strict=False)
         df_updated = df_orig.join(weights_df, on=join_cols, how="left")
         df_updated = df_updated.with_columns(
             pl.col("W_JT").fill_null(1.0),
@@ -216,13 +215,11 @@ def fit_declaration_model(cfg: PipelineConfig) -> Path:
     else:
         df_updated = df_model
 
-    df_updated.write_parquet(firm_path, compression="zstd")
+    write_parquet(cfg.minio, firm_object, df_updated)
 
     # --- Save model ---
-    model_path = cfg.paths.models / "declaration_model.pkl"
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(model_path, "wb") as f:
-        pickle.dump({"model": model, "auc": auc, "features": cat_feats + num_feats}, f)
-    logger.info("Declaration model saved to {}", model_path)
+    model_object = f"{cfg.minio.models_prefix}declaration_model.pkl"
+    write_pickle(cfg.minio, model_object, {"model": model, "auc": auc, "features": cat_feats + num_feats})
+    logger.info("Declaration model saved to {}", model_object)
 
-    return firm_path
+    return firm_object

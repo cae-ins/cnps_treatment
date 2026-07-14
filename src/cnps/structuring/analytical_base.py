@@ -14,15 +14,15 @@ Brick, J. M. & Kalton, G. (1996). Handling missing data in survey research.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig
+from cnps.storage import read_parquet, write_parquet
+from cnps.storage.minio_client import object_exists
 
 
-def build_analytical_base(cfg: PipelineConfig) -> Path:
+def build_analytical_base(cfg: PipelineConfig) -> str:
     """
     Merge individual and firm bases into the analytical base.
 
@@ -33,18 +33,18 @@ def build_analytical_base(cfg: PipelineConfig) -> Path:
 
     Returns
     -------
-    Path
-        Path to the analytical base Parquet file.
+    str
+        Object name of the analytical base Parquet file on MinIO.
     """
-    indiv_path = cfg.paths.cleaned_data / "individual_base.parquet"
-    firm_path = cfg.paths.cleaned_data / "firm_base.parquet"
+    indiv_object = f"{cfg.minio.cleaned_prefix}individual_base.parquet"
+    firm_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
 
-    for p, label in [(indiv_path, "Individual"), (firm_path, "Firm")]:
-        if not p.exists():
-            raise FileNotFoundError(f"{label} base not found: {p}")
+    for obj, label in [(indiv_object, "Individual"), (firm_object, "Firm")]:
+        if not object_exists(cfg.minio, obj):
+            raise FileNotFoundError(f"{label} base not found: {obj}")
 
-    indiv = pl.read_parquet(indiv_path)
-    firm = pl.read_parquet(firm_path)
+    indiv = read_parquet(cfg.minio, indiv_object)
+    firm = read_parquet(cfg.minio, firm_object)
 
     logger.info("Merging individual ({} rows) with firm ({} rows)",
                 indiv.height, firm.height)
@@ -82,9 +82,9 @@ def build_analytical_base(cfg: PipelineConfig) -> Path:
                 logger.warning("Dimension column '{}' ({}) not found in analytical base",
                                col, dim.label)
 
-    out_path = cfg.paths.cleaned_data / "analytical_base.parquet"
-    analytical.write_parquet(out_path, compression="zstd")
+    out_object = f"{cfg.minio.cleaned_prefix}analytical_base.parquet"
+    write_parquet(cfg.minio, out_object, analytical)
     logger.info("Analytical base: {} rows, {} cols -> {}",
-                analytical.height, analytical.width, out_path)
+                analytical.height, analytical.width, out_object)
 
-    return out_path
+    return out_object

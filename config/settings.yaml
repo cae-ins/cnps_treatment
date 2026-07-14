@@ -7,8 +7,10 @@
 
 # --- Chemins du projet ---
 paths:
-  # Repertoire racine du projet source (donnees brutes)
-  project_root: "c:/Users/e_koffie/Documents/Salaires/CNPS_TREATMENT_V2"
+  # Repertoire racine du projet source (cache local de travail uniquement -
+  # les donnees de reference vivent sur MinIO, voir section minio ci-dessous).
+  # Laisser vide: resolu automatiquement vers la racine du depot par config.py
+  project_root: ""
   # Donnees brutes Excel (fichiers MM_YYYY.xlsx)
   raw_data: "${project_root}/data/raw"
   # Donnees converties en Parquet
@@ -81,19 +83,21 @@ minio:
   # Adresse du serveur MinIO (reseau interne)
   endpoint: "192.168.1.230:30137"
   # Bucket source des donnees CNPS
-  bucket: "admindataanstat"
+  bucket: "staging"
   # Prefixe dedie au pipeline, isole des autres donnees deja presentes dans le bucket
-  # (CNPS/, CNPS_FUSION/, Solde/, etc. contiennent des exports sans rapport)
-  # Prefixe des fichiers Excel bruts (MM_YYYY.xlsx)
-  raw_prefix: "CNPS_PIPELINE_V2/raw_data/"
+  # Fichiers Excel bruts (MM_YYYY.xlsx), directement a la racine de cnps/
+  # ATTENTION: ce prefixe contient aussi des CSV sans rapport (ETAT_TRAVAILLEUR_*.csv)
+  # et un sous-dossier fichiers_mensuels/ : le code doit filtrer par extension/pattern,
+  # ne jamais lister ce prefixe sans filtre.
+  raw_prefix: "cnps/"
   # Prefixe des parquets issus de l'ingestion (MM_YYYY.parquet) + registre de suivi
-  processed_prefix: "CNPS_PIPELINE_V2/processed_data/"
+  processed_prefix: "cnps/processed_data/"
   # Prefixe des donnees nettoyees et des bases structurees
-  cleaned_prefix: "CNPS_PIPELINE_V2/cleaned_data/"
+  cleaned_prefix: "cnps/cleaned_data/"
   # Prefixe des modeles sauvegardes (.pkl)
-  models_prefix: "CNPS_PIPELINE_V2/models/"
+  models_prefix: "cnps/models/"
   # Prefixe des exports Excel finaux (indicateurs, rapports, audits)
-  output_prefix: "CNPS_PIPELINE_V2/output/"
+  output_prefix: "cnps/output/"
   # Connexion chiffree (le serveur interne tourne en HTTP simple)
   secure: false
 

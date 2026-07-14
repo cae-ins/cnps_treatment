@@ -23,15 +23,15 @@ Wooldridge, J. M. (2007). Inverse probability weighted estimation for
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig
+from cnps.storage import read_parquet, write_parquet
+from cnps.storage.minio_client import object_exists
 
 
-def build_firm_base(cfg: PipelineConfig) -> Path:
+def build_firm_base(cfg: PipelineConfig) -> str:
     """
     Build the firm-time panel base.
 
@@ -51,14 +51,14 @@ def build_firm_base(cfg: PipelineConfig) -> Path:
 
     Returns
     -------
-    Path
-        Path to the firm base Parquet file.
+    str
+        Object name of the firm base Parquet file on MinIO.
     """
-    indiv_path = cfg.paths.cleaned_data / "individual_base.parquet"
-    if not indiv_path.exists():
-        raise FileNotFoundError(f"Individual base not found: {indiv_path}")
+    indiv_object = f"{cfg.minio.cleaned_prefix}individual_base.parquet"
+    if not object_exists(cfg.minio, indiv_object):
+        raise FileNotFoundError(f"Individual base not found: {indiv_object}")
 
-    df = pl.read_parquet(indiv_path)
+    df = read_parquet(cfg.minio, indiv_object)
     logger.info("Building firm base from {} individual records", df.height)
 
     # --- Aggregation to firm-period level ---
@@ -165,8 +165,8 @@ def build_firm_base(cfg: PipelineConfig) -> Path:
                 .alias("TAUX_DECLARATION_PASSE")
             )
 
-    out_path = cfg.paths.cleaned_data / "firm_base.parquet"
-    firm_df.write_parquet(out_path, compression="zstd")
-    logger.info("Firm base: {} rows -> {}", firm_df.height, out_path)
+    out_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
+    write_parquet(cfg.minio, out_object, firm_df)
+    logger.info("Firm base: {} rows -> {}", firm_df.height, out_object)
 
-    return out_path
+    return out_object

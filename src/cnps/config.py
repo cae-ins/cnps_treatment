@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 from loguru import logger
 
 
@@ -181,9 +182,12 @@ def load_config(
     PipelineConfig
         Fully resolved, immutable configuration.
     """
-    config_dir = Path(__file__).resolve().parents[2] / "config"
+    repo_root = Path(__file__).resolve().parents[2]
+    config_dir = repo_root / "config"
     settings_path = Path(settings_path) if settings_path else config_dir / "settings.yaml"
     dimensions_path = Path(dimensions_path) if dimensions_path else config_dir / "dimensions.yaml"
+
+    load_dotenv(repo_root / ".env")
 
     with open(settings_path, encoding="utf-8") as fh:
         settings: dict = yaml.safe_load(fh)
@@ -191,6 +195,8 @@ def load_config(
         dims_raw: dict = yaml.safe_load(fh)
 
     # --- Paths ---
+    if not settings["paths"].get("project_root"):
+        settings["paths"]["project_root"] = str(repo_root)
     resolved = _resolve_paths(settings["paths"])
     paths = PathsConfig(**resolved)
 

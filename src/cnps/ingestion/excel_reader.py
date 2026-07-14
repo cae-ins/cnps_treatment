@@ -1,9 +1,10 @@
 """
 Ingestion module: Excel -> Parquet conversion with incremental processing.
 
-Reads raw CNPS salary declaration files (Excel format MM_YYYY.xlsx),
-concatenates all sheets within each workbook, and writes to columnar
-Parquet format for downstream processing.
+Reads raw CNPS salary declaration files (Excel format MM_YYYY.xlsx) from
+MinIO, concatenates all sheets within each workbook, and writes to columnar
+Parquet format on MinIO for downstream processing. No file ever touches
+local disk: everything transits through in-memory buffers.
 
 Key improvements over v1:
 - Parquet instead of Stata (.dta): ~5-10x faster I/O, native compression
@@ -20,30 +21,27 @@ Apache Parquet format specification:
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from datetime import datetime
-from pathlib import Path
 
 import polars as pl
 from joblib import Parallel, delayed
 from loguru import logger
 
-from cnps.config import PipelineConfig
-from cnps.storage import download_raw_data
+from cnps.config import MinioConfig, PipelineConfig
+from cnps.storage import list_objects, read_excel_bytes, read_json, write_json, write_parquet
+from cnps.storage.minio_client import object_exists
+
+_REGISTRY_OBJECT_NAME = ".file_registry.json"
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _file_hash(path: Path) -> str:
-    """Compute MD5 hash of a file for change detection."""
-    h = hashlib.md5()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def _bytes_hash(data: bytes) -> str:
+    """Compute MD5 hash of raw bytes for change detection."""
+    return hashlib.md5(data).hexdigest()
 
 
 def _parse_period(filename: str, regex: str) -> tuple[int, int]:
@@ -75,9 +73,9 @@ def _parse_period(filename: str, regex: str) -> tuple[int, int]:
     return int(m.group(1)), int(m.group(2))
 
 
-def _read_single_excel(path: Path, skip_sheets: list[str]) -> pl.DataFrame:
+def _read_single_excel(data: bytes, filename: str, skip_sheets: list[str]) -> pl.DataFrame:
     """
-    Read all sheets from one Excel workbook and concatenate them.
+    Read all sheets from one in-memory Excel workbook and concatenate them.
 
     All columns are initially read as strings to avoid type-coercion issues
     across heterogeneous sheets.  Type harmonisation is handled downstream
@@ -85,8 +83,10 @@ def _read_single_excel(path: Path, skip_sheets: list[str]) -> pl.DataFrame:
 
     Parameters
     ----------
-    path : Path
-        Path to the ``.xlsx`` file.
+    data : bytes
+        Raw content of the ``.xlsx`` file.
+    filename : str
+        Original file name, used only for logging.
     skip_sheets : list[str]
         Sheet names (or regex patterns) to ignore.
 
@@ -95,9 +95,12 @@ def _read_single_excel(path: Path, skip_sheets: list[str]) -> pl.DataFrame:
     pl.DataFrame
         Concatenated data from all retained sheets.
     """
+    import io
+
     import openpyxl
 
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    buf = io.BytesIO(data)
+    wb = openpyxl.load_workbook(buf, read_only=True, data_only=True)
     sheet_names = [
         s for s in wb.sheetnames
         if not any(re.match(pat, s) for pat in skip_sheets)
@@ -107,15 +110,15 @@ def _read_single_excel(path: Path, skip_sheets: list[str]) -> pl.DataFrame:
     frames: list[pl.DataFrame] = []
     for sheet in sheet_names:
         try:
-            df = pl.read_excel(path, sheet_name=sheet, infer_schema_length=0)
+            df = pl.read_excel(io.BytesIO(data), sheet_name=sheet, infer_schema_length=0)
             if df.height > 0:
                 frames.append(df)
                 logger.debug("  Sheet '{}': {} rows", sheet, df.height)
         except Exception as exc:
-            logger.warning("  Skipping sheet '{}' in {}: {}", sheet, path.name, exc)
+            logger.warning("  Skipping sheet '{}' in {}: {}", sheet, filename, exc)
 
     if not frames:
-        logger.warning("No data found in {}", path.name)
+        logger.warning("No data found in {}", filename)
         return pl.DataFrame()
 
     # Align column names (union of all columns) and concatenate
@@ -131,22 +134,26 @@ def _read_single_excel(path: Path, skip_sheets: list[str]) -> pl.DataFrame:
 
 
 def _process_one_file(
-    path: Path,
-    output_dir: Path,
+    minio_cfg: MinioConfig,
+    object_name: str,
+    processed_prefix: str,
     filename_regex: str,
     skip_sheets: list[str],
 ) -> dict:
     """
-    Process a single Excel file: read, tag with period, write to Parquet.
+    Process a single Excel object from MinIO: read, tag with period, write
+    the resulting Parquet back to MinIO.
 
     Returns a metadata dict for the registry.
     """
-    month, year = _parse_period(path.name, filename_regex)
-    logger.info("Ingesting {} (period: {:02d}/{:04d})", path.name, month, year)
+    filename = object_name.rsplit("/", 1)[-1]
+    month, year = _parse_period(filename, filename_regex)
+    logger.info("Ingesting {} (period: {:02d}/{:04d})", filename, month, year)
 
-    df = _read_single_excel(path, skip_sheets)
+    data = read_excel_bytes(minio_cfg, object_name).getvalue()
+    df = _read_single_excel(data, filename, skip_sheets)
     if df.height == 0:
-        return {"file": path.name, "status": "empty", "rows": 0}
+        return {"file": filename, "status": "empty", "rows": 0}
 
     # Add period columns
     df = df.with_columns(
@@ -155,40 +162,40 @@ def _process_one_file(
         pl.lit(f"{year:04d}-{month:02d}").alias("PERIOD"),
     )
 
-    out_path = output_dir / f"{month:02d}_{year:04d}.parquet"
-    df.write_parquet(out_path, compression="zstd")
+    out_object = f"{processed_prefix}{month:02d}_{year:04d}.parquet"
+    write_parquet(minio_cfg, out_object, df)
 
     return {
-        "file": path.name,
+        "file": filename,
         "status": "ok",
         "rows": df.height,
         "columns": df.width,
-        "output": str(out_path),
-        "hash": _file_hash(path),
+        "output": out_object,
+        "hash": _bytes_hash(data),
         "timestamp": datetime.now().isoformat(),
     }
 
 
 # ---------------------------------------------------------------------------
-# Registry (tracks which files have been processed)
+# Registry (tracks which files have been processed), stored on MinIO
 # ---------------------------------------------------------------------------
 
 class _FileRegistry:
-    """Simple JSON-based registry to track processed files and their hashes."""
+    """JSON-based registry (on MinIO) tracking processed files and their hashes."""
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
+    def __init__(self, minio_cfg: MinioConfig, processed_prefix: str) -> None:
+        self._cfg = minio_cfg
+        self._object_name = f"{processed_prefix}{_REGISTRY_OBJECT_NAME}"
         self._data: dict[str, str] = {}
-        if self.path.exists():
-            self._data = json.loads(self.path.read_text(encoding="utf-8"))
+        if object_exists(minio_cfg, self._object_name):
+            self._data = read_json(minio_cfg, self._object_name)
 
-    def needs_processing(self, file_path: Path) -> bool:
-        current_hash = _file_hash(file_path)
-        return self._data.get(file_path.name) != current_hash
+    def needs_processing(self, filename: str, data: bytes) -> bool:
+        return self._data.get(filename) != _bytes_hash(data)
 
     def update(self, file_name: str, file_hash: str) -> None:
         self._data[file_name] = file_hash
-        self.path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
+        write_json(self._cfg, self._object_name, self._data)
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +204,7 @@ class _FileRegistry:
 
 def ingest(cfg: PipelineConfig) -> list[dict]:
     """
-    Run the full ingestion stage: Excel -> Parquet for all raw files.
+    Run the full ingestion stage: Excel -> Parquet for all raw files on MinIO.
 
     Implements incremental processing: only files whose content has changed
     (detected via MD5 hash) are re-processed.
@@ -212,27 +219,28 @@ def ingest(cfg: PipelineConfig) -> list[dict]:
     list[dict]
         Metadata for each processed file.
     """
-    raw_dir = cfg.paths.raw_data
-    out_dir = cfg.paths.processed_data
-    out_dir.mkdir(parents=True, exist_ok=True)
+    filename_regex = cfg.ingestion.filename_regex
 
-    try:
-        download_raw_data(cfg.minio, raw_dir)
-    except Exception as exc:
-        logger.warning(
-            "MinIO sync failed, falling back to local files in {}: {}", raw_dir, exc,
-        )
-
-    pattern = cfg.ingestion.file_pattern
-    files = sorted(raw_dir.glob(pattern))
+    all_objects = list_objects(cfg.minio, cfg.minio.raw_prefix, recursive=False)
+    files = sorted(
+        obj for obj in all_objects
+        if re.match(filename_regex, obj.rsplit("/", 1)[-1])
+    )
     if not files:
-        logger.warning("No files matching '{}' found in {}", pattern, raw_dir)
+        logger.warning(
+            "No objects matching '{}' found under '{}'", filename_regex, cfg.minio.raw_prefix,
+        )
         return []
 
-    registry = _FileRegistry(out_dir / ".file_registry.json")
+    registry = _FileRegistry(cfg.minio, cfg.minio.processed_prefix)
 
-    # Filter to only changed files
-    to_process = [f for f in files if registry.needs_processing(f)]
+    # Filter to only changed files (requires downloading to hash - cheap vs. re-ingestion)
+    to_process: list[str] = []
+    for object_name in files:
+        filename = object_name.rsplit("/", 1)[-1]
+        data = read_excel_bytes(cfg.minio, object_name).getvalue()
+        if registry.needs_processing(filename, data):
+            to_process.append(object_name)
     logger.info(
         "Found {} files, {} need processing",
         len(files), len(to_process),
@@ -247,16 +255,18 @@ def ingest(cfg: PipelineConfig) -> list[dict]:
     if len(to_process) == 1 or cfg.parallel.n_jobs == 1:
         results = [
             _process_one_file(
-                f, out_dir, cfg.ingestion.filename_regex, cfg.ingestion.skip_sheets,
+                cfg.minio, object_name, cfg.minio.processed_prefix,
+                filename_regex, cfg.ingestion.skip_sheets,
             )
-            for f in to_process
+            for object_name in to_process
         ]
     else:
         results = Parallel(n_jobs=cfg.parallel.n_jobs, backend=cfg.parallel.backend)(
             delayed(_process_one_file)(
-                f, out_dir, cfg.ingestion.filename_regex, cfg.ingestion.skip_sheets,
+                cfg.minio, object_name, cfg.minio.processed_prefix,
+                filename_regex, cfg.ingestion.skip_sheets,
             )
-            for f in to_process
+            for object_name in to_process
         )
 
     # Update registry

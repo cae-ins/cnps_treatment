@@ -17,13 +17,14 @@ Van Buuren, S. (2018). *Flexible Imputation of Missing Data* (2nd ed.).
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
-from pathlib import Path
 
 import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig
+from cnps.storage import list_objects, read_parquet, write_parquet
 
 # ---------------------------------------------------------------------------
 # Column schema definition
@@ -170,12 +171,12 @@ def _ensure_string_ids(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
 # Public API
 # ---------------------------------------------------------------------------
 
-def harmonize_types(cfg: PipelineConfig) -> list[Path]:
+def harmonize_types(cfg: PipelineConfig) -> list[str]:
     """
-    Harmonise column types across all monthly Parquet files.
+    Harmonise column types across all monthly Parquet files on MinIO.
 
-    Reads each file from ``processed_data``, applies type coercion,
-    and overwrites in place.
+    Reads each object from ``processed_prefix``, applies type coercion,
+    and overwrites it in place.
 
     Parameters
     ----------
@@ -184,21 +185,21 @@ def harmonize_types(cfg: PipelineConfig) -> list[Path]:
 
     Returns
     -------
-    list[Path]
-        Paths to all harmonised Parquet files.
+    list[str]
+        Object names of all harmonised Parquet files.
     """
-    processed_dir = cfg.paths.processed_data
-    files = sorted(processed_dir.glob("*.parquet"))
+    all_objects = list_objects(cfg.minio, cfg.minio.processed_prefix, recursive=False)
+    files = sorted(obj for obj in all_objects if re.search(r"\.parquet$", obj))
 
     if not files:
-        logger.warning("No Parquet files found in {}", processed_dir)
+        logger.warning("No Parquet files found under {}", cfg.minio.processed_prefix)
         return []
 
-    result_paths: list[Path] = []
+    result_objects: list[str] = []
 
-    for path in files:
-        logger.info("Harmonising types: {}", path.name)
-        df = pl.read_parquet(path)
+    for object_name in files:
+        logger.info("Harmonising types: {}", object_name)
+        df = read_parquet(cfg.minio, object_name)
 
         df = _normalize_column_names(df)
         df = _ensure_string_ids(df, _ID_COLS)
@@ -206,10 +207,10 @@ def harmonize_types(cfg: PipelineConfig) -> list[Path]:
         df = _coerce_dates(df, _DATE_COLS)
 
         # Overwrite with harmonised types
-        df.write_parquet(path, compression="zstd")
-        result_paths.append(path)
+        write_parquet(cfg.minio, object_name, df)
+        result_objects.append(object_name)
 
-        logger.debug("  {} -> {} rows, {} cols", path.name, df.height, df.width)
+        logger.debug("  {} -> {} rows, {} cols", object_name, df.height, df.width)
 
-    logger.info("Type harmonisation complete for {} files", len(result_paths))
-    return result_paths
+    logger.info("Type harmonisation complete for {} files", len(result_objects))
+    return result_objects

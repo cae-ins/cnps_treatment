@@ -10,13 +10,14 @@ Uses XlsxWriter for performance (faster than openpyxl for write-only).
 
 from __future__ import annotations
 
-from pathlib import Path
+import io
 
 import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig
 from cnps.diagnostics.validation import ValidationReport
+from cnps.storage import write_workbook
 
 
 # ---------------------------------------------------------------------------
@@ -57,11 +58,10 @@ def export_indicators(
 
     Returns
     -------
-    Path
-        Path to the generated Excel file.
+    str
+        Object name of the generated Excel file on MinIO.
     """
-    out_path = cfg.paths.output / filename
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_object = f"{cfg.minio.output_prefix}{filename}"
 
     # Group by dimension
     if "dimension" not in results.columns:
@@ -69,92 +69,93 @@ def export_indicators(
 
     dimensions = results["dimension"].unique().sort().to_list()
 
-    # Use xlsxwriter via polars or direct
-    import xlsxwriter
+    def _write(buf: io.BytesIO) -> None:
+        import xlsxwriter
 
-    wb = xlsxwriter.Workbook(str(out_path))
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
 
-    # Formats
-    header_fmt = wb.add_format({
-        "bold": True,
-        "font_color": _HEADER_FONT,
-        "bg_color": _HEADER_COLOR,
-        "border": 1,
-        "text_wrap": True,
-        "valign": "vcenter",
-        "align": "center",
-    })
-    number_fmt = wb.add_format({"num_format": _NUMBER_FMT, "border": 1})
-    decimal_fmt = wb.add_format({"num_format": _DECIMAL_FMT, "border": 1})
-    text_fmt = wb.add_format({"border": 1, "text_wrap": True})
-    alt_fmt = wb.add_format({"bg_color": _ALT_ROW_COLOR, "border": 1})
-    alt_number_fmt = wb.add_format({
-        "num_format": _NUMBER_FMT, "bg_color": _ALT_ROW_COLOR, "border": 1,
-    })
+        # Formats
+        header_fmt = wb.add_format({
+            "bold": True,
+            "font_color": _HEADER_FONT,
+            "bg_color": _HEADER_COLOR,
+            "border": 1,
+            "text_wrap": True,
+            "valign": "vcenter",
+            "align": "center",
+        })
+        number_fmt = wb.add_format({"num_format": _NUMBER_FMT, "border": 1})
+        decimal_fmt = wb.add_format({"num_format": _DECIMAL_FMT, "border": 1})
+        text_fmt = wb.add_format({"border": 1, "text_wrap": True})
+        alt_fmt = wb.add_format({"bg_color": _ALT_ROW_COLOR, "border": 1})
+        alt_number_fmt = wb.add_format({
+            "num_format": _NUMBER_FMT, "bg_color": _ALT_ROW_COLOR, "border": 1,
+        })
 
-    # Label mapping for headers
-    stat_labels = {s.name: s.label for s in cfg.statistics}
+        # Label mapping for headers
+        stat_labels = {s.name: s.label for s in cfg.statistics}
 
-    for dim_label in dimensions:
-        # Sanitize sheet name (max 31 chars, no special chars)
-        sheet_name = dim_label[:31].replace("/", "-").replace("\\", "-")
-        ws = wb.add_worksheet(sheet_name)
+        for dim_label in dimensions:
+            # Sanitize sheet name (max 31 chars, no special chars)
+            sheet_name = dim_label[:31].replace("/", "-").replace("\\", "-")
+            ws = wb.add_worksheet(sheet_name)
 
-        dim_df = results.filter(pl.col("dimension") == dim_label)
+            dim_df = results.filter(pl.col("dimension") == dim_label)
 
-        # Determine columns to write
-        cols = [c for c in dim_df.columns if c != "dimension"]
+            # Determine columns to write
+            cols = [c for c in dim_df.columns if c != "dimension"]
 
-        # Write headers
-        for col_idx, col_name in enumerate(cols):
-            label = stat_labels.get(col_name, col_name.replace("_", " ").title())
-            ws.write(0, col_idx, label, header_fmt)
-
-        # Write data
-        for row_idx in range(dim_df.height):
-            is_alt = row_idx % 2 == 1
+            # Write headers
             for col_idx, col_name in enumerate(cols):
-                value = dim_df[col_name][row_idx]
+                label = stat_labels.get(col_name, col_name.replace("_", " ").title())
+                ws.write(0, col_idx, label, header_fmt)
 
-                if value is None:
-                    ws.write(row_idx + 1, col_idx, "—", text_fmt)
-                elif isinstance(value, (int, float)):
-                    fmt = alt_number_fmt if is_alt else number_fmt
-                    ws.write_number(row_idx + 1, col_idx, value, fmt)
-                else:
-                    fmt = alt_fmt if is_alt else text_fmt
-                    ws.write(row_idx + 1, col_idx, str(value), fmt)
+            # Write data
+            for row_idx in range(dim_df.height):
+                is_alt = row_idx % 2 == 1
+                for col_idx, col_name in enumerate(cols):
+                    value = dim_df[col_name][row_idx]
 
-        # Auto-fit column widths (approximate)
-        for col_idx, col_name in enumerate(cols):
-            max_len = max(
-                len(stat_labels.get(col_name, col_name)),
-                max((len(str(dim_df[col_name][i] or ""))
-                     for i in range(min(dim_df.height, 100))),
-                    default=10),
-            )
-            ws.set_column(col_idx, col_idx, min(max_len + 4, 30))
+                    if value is None:
+                        ws.write(row_idx + 1, col_idx, "—", text_fmt)
+                    elif isinstance(value, (int, float)):
+                        fmt = alt_number_fmt if is_alt else number_fmt
+                        ws.write_number(row_idx + 1, col_idx, value, fmt)
+                    else:
+                        fmt = alt_fmt if is_alt else text_fmt
+                        ws.write(row_idx + 1, col_idx, str(value), fmt)
 
-        # Freeze top row
-        ws.freeze_panes(1, 0)
+            # Auto-fit column widths (approximate)
+            for col_idx, col_name in enumerate(cols):
+                max_len = max(
+                    len(stat_labels.get(col_name, col_name)),
+                    max((len(str(dim_df[col_name][i] or ""))
+                         for i in range(min(dim_df.height, 100))),
+                        default=10),
+                )
+                ws.set_column(col_idx, col_idx, min(max_len + 4, 30))
 
-        # Auto-filter
-        if cols:
-            ws.autofilter(0, 0, dim_df.height, len(cols) - 1)
+            # Freeze top row
+            ws.freeze_panes(1, 0)
 
-    wb.close()
-    logger.info("Indicators exported to {}", out_path)
-    return out_path
+            # Auto-filter
+            if cols:
+                ws.autofilter(0, 0, dim_df.height, len(cols) - 1)
+
+        wb.close()
+
+    write_workbook(cfg.minio, out_object, _write)
+    logger.info("Indicators exported to {}", out_object)
+    return out_object
 
 
 def export_validation_report(
     cfg: PipelineConfig,
     report: ValidationReport,
     filename: str = "rapport_validation.xlsx",
-) -> Path:
-    """Export validation report to Excel."""
-    out_path = cfg.paths.output / filename
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+) -> str:
+    """Export validation report to Excel on MinIO."""
+    out_object = f"{cfg.minio.output_prefix}{filename}"
 
     rows = []
     for issue in report.issues:
@@ -165,16 +166,18 @@ def export_validation_report(
             "Message": issue.message,
         })
 
-    if rows:
-        df = pl.DataFrame(rows)
-        df.write_excel(out_path)
-    else:
-        # Write empty workbook
-        import xlsxwriter
-        wb = xlsxwriter.Workbook(str(out_path))
-        ws = wb.add_worksheet("Validation")
-        ws.write(0, 0, "Aucun probleme detecte")
-        wb.close()
+    def _write(buf: io.BytesIO) -> None:
+        if rows:
+            df = pl.DataFrame(rows)
+            df.write_excel(buf)
+        else:
+            # Write empty workbook
+            import xlsxwriter
+            wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+            ws = wb.add_worksheet("Validation")
+            ws.write(0, 0, "Aucun probleme detecte")
+            wb.close()
 
-    logger.info("Validation report exported to {}", out_path)
-    return out_path
+    write_workbook(cfg.minio, out_object, _write)
+    logger.info("Validation report exported to {}", out_object)
+    return out_object

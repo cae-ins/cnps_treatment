@@ -21,14 +21,15 @@ Output: an Excel workbook with one sheet per check.
 
 from __future__ import annotations
 
+import io
 import re
 from datetime import datetime
-from pathlib import Path
 
 import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig
+from cnps.storage import list_objects, read_parquet, write_workbook
 
 
 # ---------------------------------------------------------------------------
@@ -46,14 +47,18 @@ def _parse_period(filename: str) -> tuple[int, int]:
     return 0, 0
 
 
-def _load_files(folder: Path) -> list[tuple[str, int, int, pl.DataFrame]]:
-    """Load all parquet files, sorted by (ANNEE, MOIS)."""
-    files = sorted(folder.glob("*.parquet"))
+def _load_files(minio_cfg, prefix: str) -> list[tuple[str, int, int, pl.DataFrame]]:
+    """Load all parquet objects under a MinIO prefix, sorted by (ANNEE, MOIS)."""
+    objects = sorted(
+        obj for obj in list_objects(minio_cfg, prefix, recursive=False)
+        if obj.endswith(".parquet")
+    )
     result = []
-    for fp in files:
-        mois, annee = _parse_period(fp.name)
-        df = pl.read_parquet(fp)
-        result.append((fp.name, mois, annee, df))
+    for object_name in objects:
+        filename = object_name.rsplit("/", 1)[-1]
+        mois, annee = _parse_period(filename)
+        df = read_parquet(minio_cfg, object_name)
+        result.append((filename, mois, annee, df))
     result.sort(key=lambda x: (x[2], x[1]))
     return result
 
@@ -306,25 +311,25 @@ def _check_transitions(data: list[tuple[str, int, int, pl.DataFrame]],
 def run_audit(
     cfg: PipelineConfig,
     *,
-    input_folder: Path | None = None,
-    output_folder: Path | None = None,
+    input_prefix: str | None = None,
+    output_prefix: str | None = None,
     salary_var: str = "SALAIRE_BRUT",
     id_var: str = "ID_INDIV",
     iqr_multiplier: float = 1.5,
-) -> Path:
+) -> str:
     """
-    Run the full data quality audit and export results to Excel.
+    Run the full data quality audit and export results to Excel on MinIO.
 
     Parameters
     ----------
     cfg : PipelineConfig
-        Pipeline configuration (used for default paths).
-    input_folder : Path, optional
-        Folder containing parquet files to audit.
-        Defaults to ``cfg.paths.processed_data``.
-    output_folder : Path, optional
-        Folder for the output Excel file.
-        Defaults to ``cfg.paths.output``.
+        Pipeline configuration (used for default MinIO prefixes).
+    input_prefix : str, optional
+        MinIO prefix containing parquet objects to audit.
+        Defaults to ``cfg.minio.processed_prefix``.
+    output_prefix : str, optional
+        MinIO prefix for the output Excel file.
+        Defaults to ``cfg.minio.output_prefix``.
     salary_var : str
         Column name for salary outlier detection.
     id_var : str
@@ -334,29 +339,27 @@ def run_audit(
 
     Returns
     -------
-    Path
-        Path to the generated Excel audit file.
+    str
+        Object name of the generated Excel audit file on MinIO.
     """
-    if input_folder is None:
-        input_folder = cfg.paths.processed_data
-    if output_folder is None:
-        output_folder = cfg.paths.output
-
-    output_folder.mkdir(parents=True, exist_ok=True)
+    if input_prefix is None:
+        input_prefix = cfg.minio.processed_prefix
+    if output_prefix is None:
+        output_prefix = cfg.minio.output_prefix
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = output_folder / f"audit_fichiers_cnps_{timestamp}.xlsx"
+    output_object = f"{output_prefix}audit_fichiers_cnps_{timestamp}.xlsx"
 
     logger.info("=" * 60)
     logger.info("AUDIT QUALITE DES DONNEES")
     logger.info("=" * 60)
-    logger.info("Dossier source: {}", input_folder)
+    logger.info("Prefixe source: {}", input_prefix)
 
     # Load all files
-    data = _load_files(input_folder)
+    data = _load_files(cfg.minio, input_prefix)
     if not data:
-        logger.warning("Aucun fichier parquet trouve dans: {}", input_folder)
-        return output_file
+        logger.warning("Aucun fichier parquet trouve sous: {}", input_prefix)
+        return output_object
 
     logger.info("Fichiers a auditer: {}", len(data))
 
@@ -388,7 +391,8 @@ def run_audit(
     # Export to Excel with xlsxwriter
     logger.info("Export Excel...")
     _export_audit_excel(
-        output_file,
+        cfg,
+        output_object,
         doublons=df_doublons,
         colonnes=df_colonnes,
         types=df_types,
@@ -399,8 +403,8 @@ def run_audit(
         transitions=df_transitions,
     )
 
-    logger.info("Fichier d'audit genere: {}", output_file)
-    return output_file
+    logger.info("Fichier d'audit genere: {}", output_object)
+    return output_object
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +417,8 @@ _ALT_ROW_COLOR = "#F2F3F4"
 
 
 def _export_audit_excel(
-    output_path: Path,
+    cfg: PipelineConfig,
+    output_object: str,
     *,
     doublons: pl.DataFrame,
     colonnes: pl.DataFrame,
@@ -424,53 +429,56 @@ def _export_audit_excel(
     top_doublons_id: pl.DataFrame,
     transitions: pl.DataFrame,
 ) -> None:
-    """Write all audit dataframes to a formatted Excel workbook."""
-    import xlsxwriter
+    """Write all audit dataframes to a formatted Excel workbook on MinIO."""
+    def _write(buf: io.BytesIO) -> None:
+        import xlsxwriter
 
-    wb = xlsxwriter.Workbook(str(output_path))
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
 
-    header_fmt = wb.add_format({
-        "bold": True,
-        "font_color": _HEADER_FONT,
-        "bg_color": _HEADER_COLOR,
-        "border": 1,
-        "text_wrap": True,
-        "valign": "vcenter",
-        "align": "center",
-    })
-    number_fmt = wb.add_format({"num_format": "#,##0", "border": 1})
-    decimal_fmt = wb.add_format({"num_format": "#,##0.00", "border": 1})
-    text_fmt = wb.add_format({"border": 1, "text_wrap": True})
-    alt_number_fmt = wb.add_format({
-        "num_format": "#,##0", "bg_color": _ALT_ROW_COLOR, "border": 1,
-    })
-    alt_decimal_fmt = wb.add_format({
-        "num_format": "#,##0.00", "bg_color": _ALT_ROW_COLOR, "border": 1,
-    })
-    alt_text_fmt = wb.add_format({
-        "bg_color": _ALT_ROW_COLOR, "border": 1, "text_wrap": True,
-    })
+        header_fmt = wb.add_format({
+            "bold": True,
+            "font_color": _HEADER_FONT,
+            "bg_color": _HEADER_COLOR,
+            "border": 1,
+            "text_wrap": True,
+            "valign": "vcenter",
+            "align": "center",
+        })
+        number_fmt = wb.add_format({"num_format": "#,##0", "border": 1})
+        decimal_fmt = wb.add_format({"num_format": "#,##0.00", "border": 1})
+        text_fmt = wb.add_format({"border": 1, "text_wrap": True})
+        alt_number_fmt = wb.add_format({
+            "num_format": "#,##0", "bg_color": _ALT_ROW_COLOR, "border": 1,
+        })
+        alt_decimal_fmt = wb.add_format({
+            "num_format": "#,##0.00", "bg_color": _ALT_ROW_COLOR, "border": 1,
+        })
+        alt_text_fmt = wb.add_format({
+            "bg_color": _ALT_ROW_COLOR, "border": 1, "text_wrap": True,
+        })
 
-    sheets = [
-        ("Doublons_lignes", doublons),
-        ("Colonnes", colonnes),
-        ("Types_variables", types),
-        ("Valeurs_manquantes", valeurs_manquantes),
-        ("Outliers_Salaire", outliers),
-        ("Unicite_ID", unicite_id),
-        ("Top_doublons_ID", top_doublons_id),
-    ]
+        sheets = [
+            ("Doublons_lignes", doublons),
+            ("Colonnes", colonnes),
+            ("Types_variables", types),
+            ("Valeurs_manquantes", valeurs_manquantes),
+            ("Outliers_Salaire", outliers),
+            ("Unicite_ID", unicite_id),
+            ("Top_doublons_ID", top_doublons_id),
+        ]
 
-    for sheet_name, df in sheets:
-        _write_standard_sheet(wb, sheet_name, df,
-                              header_fmt, number_fmt, decimal_fmt, text_fmt,
-                              alt_number_fmt, alt_decimal_fmt, alt_text_fmt)
+        for sheet_name, df in sheets:
+            _write_standard_sheet(wb, sheet_name, df,
+                                  header_fmt, number_fmt, decimal_fmt, text_fmt,
+                                  alt_number_fmt, alt_decimal_fmt, alt_text_fmt)
 
-    # Special formatting for the transition matrix
-    _write_transition_sheet(wb, transitions, header_fmt, number_fmt,
-                            decimal_fmt, text_fmt)
+        # Special formatting for the transition matrix
+        _write_transition_sheet(wb, transitions, header_fmt, number_fmt,
+                                decimal_fmt, text_fmt)
 
-    wb.close()
+        wb.close()
+
+    write_workbook(cfg.minio, output_object, _write)
 
 
 def _write_standard_sheet(
