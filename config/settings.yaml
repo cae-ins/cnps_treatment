@@ -75,15 +75,25 @@ estimation:
   salary_plausible_range: [75000, 50000000]
 
 # --- Stockage objet MinIO ---
+# Toutes les donnees du pipeline (brutes, intermediaires, modeles, exports)
+# vivent sur MinIO plutot que sur disque local : voir src/cnps/storage/.
 minio:
   # Adresse du serveur MinIO (reseau interne)
-  endpoint: "192.168.1.230:31157"
+  endpoint: "192.168.1.230:30137"
   # Bucket source des donnees CNPS
   bucket: "admindataanstat"
-  # Prefixe des fichiers bruts dans le bucket
-  raw_prefix: "CNPS/raw_data/"
-  # Prefixe de depot des donnees nettoyees
-  cleaned_prefix: "CNPS/cleaned_data/"
+  # Prefixe dedie au pipeline, isole des autres donnees deja presentes dans le bucket
+  # (CNPS/, CNPS_FUSION/, Solde/, etc. contiennent des exports sans rapport)
+  # Prefixe des fichiers Excel bruts (MM_YYYY.xlsx)
+  raw_prefix: "CNPS_PIPELINE_V2/raw_data/"
+  # Prefixe des parquets issus de l'ingestion (MM_YYYY.parquet) + registre de suivi
+  processed_prefix: "CNPS_PIPELINE_V2/processed_data/"
+  # Prefixe des donnees nettoyees et des bases structurees
+  cleaned_prefix: "CNPS_PIPELINE_V2/cleaned_data/"
+  # Prefixe des modeles sauvegardes (.pkl)
+  models_prefix: "CNPS_PIPELINE_V2/models/"
+  # Prefixe des exports Excel finaux (indicateurs, rapports, audits)
+  output_prefix: "CNPS_PIPELINE_V2/output/"
   # Connexion chiffree (le serveur interne tourne en HTTP simple)
   secure: false
 

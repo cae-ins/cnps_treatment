@@ -77,7 +77,10 @@ class MinioConfig:
     endpoint: str
     bucket: str
     raw_prefix: str
+    processed_prefix: str
     cleaned_prefix: str
+    models_prefix: str
+    output_prefix: str
     secure: bool
     access_key: str
     secret_key: str
@@ -223,7 +226,10 @@ def load_config(
         endpoint=mi["endpoint"],
         bucket=mi["bucket"],
         raw_prefix=mi["raw_prefix"],
+        processed_prefix=mi["processed_prefix"],
         cleaned_prefix=mi["cleaned_prefix"],
+        models_prefix=mi["models_prefix"],
+        output_prefix=mi["output_prefix"],
         secure=mi["secure"],
         access_key=os.environ.get("MINIO_ACCESS_KEY", "minioadmin"),
         secret_key=os.environ.get("MINIO_SECRET_KEY", "minioadmin"),
