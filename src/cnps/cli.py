@@ -1,33 +1,34 @@
 """
-Command-line interface for the CNPS Treatment Pipeline.
+Interface en ligne de commande du pipeline de traitement CNPS.
 
-Usage examples::
+Exemples d'utilisation::
 
-    # Run the full pipeline
+    # Pipeline complet
     cnps run
 
-    # Run specific stages
-    cnps run --from-stage CLEAN --to-stage ESTIMATION
+    # Etapes specifiques
+    cnps run --from CLEAN --to EXPORT_EXCEL
 
-    # Run only ingestion
+    # Ingestion seule
     cnps ingest
 
-    # Run only estimation and export
+    # Estimation et export seuls
     cnps estimate
 
-    # Data quality audit (Excel report with 6 checks)
+    # Audit qualite (rapport Excel avec 8 controles)
     cnps audit
-    cnps audit --input path/to/folder --salary-var SALAIRE_BRUT_MENS
+    cnps audit --input cnps/processed_data/ --salary-var SALAIRE_BRUT_MENS
 
-    # Validate data and models
+    # Validation des donnees et modeles
     cnps validate
 
-    # Show configuration
+    # Afficher la configuration
     cnps config
 """
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from typing import Optional
 
@@ -48,12 +49,10 @@ console = Console()
 
 
 def _setup_logging(cfg, verbose: bool = False) -> None:
-    """Configure loguru sinks."""
+    """Configure les sorties de journalisation (loguru)."""
     logger.remove()
-    level = "DEBUG" if verbose else cfg.logging.get("level", "INFO") \
-        if hasattr(cfg, "logging") else "INFO"
+    level = "DEBUG" if verbose else "INFO"
 
-    # Console sink
     logger.add(
         lambda msg: console.print(msg, end=""),
         level=level,
@@ -61,7 +60,6 @@ def _setup_logging(cfg, verbose: bool = False) -> None:
         colorize=True,
     )
 
-    # File sink
     log_path = cfg.paths.logs / "pipeline.log"
     logger.add(
         str(log_path),
@@ -73,26 +71,26 @@ def _setup_logging(cfg, verbose: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Commands
+# Commandes
 # ---------------------------------------------------------------------------
 
 @app.command()
 def run(
     settings: Optional[Path] = typer.Option(
-        None, "--settings", "-s", help="Path to settings.yaml",
+        None, "--settings", "-s", help="Chemin vers settings.yaml",
     ),
     dimensions: Optional[Path] = typer.Option(
-        None, "--dimensions", "-d", help="Path to dimensions.yaml",
+        None, "--dimensions", "-d", help="Chemin vers dimensions.yaml",
     ),
     from_stage: str = typer.Option(
-        "INGEST", "--from", "-f", help="First stage to run",
+        "LECTURE_FICHIERS", "--from", "-f", help="Premiere etape a executer",
     ),
     to_stage: str = typer.Option(
-        "EXPORT", "--to", "-t", help="Last stage to run",
+        "EXPORT_EXCEL", "--to", "-t", help="Derniere etape a executer",
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run the full pipeline (or a subset of stages)."""
+    """Execute le pipeline complet (ou un sous-ensemble d'etapes)."""
     cfg = load_config(settings, dimensions)
     _setup_logging(cfg, verbose)
 
@@ -101,16 +99,15 @@ def run(
         stage_to = Stage[to_stage.upper()]
     except KeyError as e:
         valid = ", ".join(s.name for s in Stage)
-        console.print(f"[red]Invalid stage: {e}. Valid stages: {valid}[/red]")
+        console.print(f"[red]Etape invalide: {e}. Etapes valides: {valid}[/red]")
         raise typer.Exit(1)
 
     result = run_pipeline(cfg, stage_from, stage_to)
 
-    # Summary table
-    table = Table(title=f"Pipeline {'OK' if result.success else 'FAILED'}")
-    table.add_column("Stage", style="cyan")
-    table.add_column("Status", justify="center")
-    table.add_column("Duration", justify="right")
+    table = Table(title=f"Pipeline {'OK' if result.success else 'ECHEC'}")
+    table.add_column("Etape", style="cyan")
+    table.add_column("Statut", justify="center")
+    table.add_column("Duree", justify="right")
 
     for s in result.stages:
         status_style = "green" if s.status == "ok" else "red" if s.status == "error" else "yellow"
@@ -129,10 +126,10 @@ def ingest(
     settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run only the ingestion stage (Excel -> Parquet)."""
+    """Execute uniquement l'ingestion (Excel -> Parquet + harmonisation des types)."""
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
-    run_pipeline(cfg, Stage.INGEST, Stage.HARMONIZE)
+    run_pipeline(cfg, Stage.LECTURE_FICHIERS, Stage.HARMONISATION_TYPES)
 
 
 @app.command()
@@ -140,10 +137,10 @@ def clean(
     settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run data cleaning and structuring."""
+    """Execute le nettoyage et la structuration des bases."""
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
-    run_pipeline(cfg, Stage.CLEAN, Stage.ANALYTICAL_BASE)
+    run_pipeline(cfg, Stage.NETTOYAGE_DONNEES, Stage.BASE_ANALYTIQUE)
 
 
 @app.command()
@@ -151,10 +148,10 @@ def model(
     settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run modeling stages (declaration, imputation, weighting)."""
+    """Execute la modelisation (declaration, imputation, ponderation)."""
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
-    run_pipeline(cfg, Stage.DECLARATION_MODEL, Stage.WEIGHTING)
+    run_pipeline(cfg, Stage.MODELE_DECLARATION, Stage.PONDERATION_FINALE)
 
 
 @app.command()
@@ -162,38 +159,38 @@ def estimate(
     settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run estimation and export."""
+    """Execute l'estimation des indicateurs et l'export Excel."""
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
-    run_pipeline(cfg, Stage.ESTIMATION, Stage.EXPORT)
+    run_pipeline(cfg, Stage.ESTIMATION_INDICATEURS, Stage.EXPORT_EXCEL)
 
 
 @app.command()
 def audit(
     settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
     input_prefix: Optional[str] = typer.Option(
-        None, "--input", "-i", help="MinIO prefix with parquet files to audit (default: processed_prefix)",
+        None, "--input", "-i", help="Prefixe MinIO des parquets a auditer (defaut: processed_prefix)",
     ),
     output_prefix: Optional[str] = typer.Option(
-        None, "--output", "-o", help="MinIO prefix for the audit Excel (default: output_prefix)",
+        None, "--output", "-o", help="Prefixe MinIO pour le rapport Excel (defaut: output_prefix)",
     ),
-    salary_var: str = typer.Option("SALAIRE_BRUT", "--salary-var", help="Column for outlier detection"),
-    id_var: str = typer.Option("ID_INDIV", "--id-var", help="Column for uniqueness check"),
+    salary_var: str = typer.Option("SALAIRE_BRUT", "--salary-var", help="Colonne pour la detection de valeurs extremes"),
+    id_var: str = typer.Option("ID_INDIV", "--id-var", help="Colonne pour le controle d'unicite"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run a full data quality audit and generate an Excel report."""
+    """Execute un audit qualite complet et genere un rapport Excel."""
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
 
-    from cnps.diagnostics.audit import run_audit
-    out = run_audit(
+    audit_module = importlib.import_module("cnps.audit_qualite")
+    out = audit_module.executer_audit(
         cfg,
         input_prefix=input_prefix,
         output_prefix=output_prefix,
         salary_var=salary_var,
         id_var=id_var,
     )
-    console.print(f"[bold green]Audit report generated:[/bold green] {out}")
+    console.print(f"[bold green]Rapport d'audit genere:[/bold green] {out}")
 
 
 @app.command()
@@ -201,17 +198,17 @@ def validate(
     settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run all validation checks."""
+    """Execute tous les controles de validation."""
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
 
-    from cnps.diagnostics.validation import run_all_validations
-    report = run_all_validations(cfg)
+    validation_module = importlib.import_module("cnps.11_validation_qualite")
+    report = validation_module.valider_tout(cfg)
 
-    table = Table(title=f"Validation Report ({report.summary()})")
-    table.add_column("Level", style="bold", width=8)
-    table.add_column("Stage", width=12)
-    table.add_column("Check", width=25)
+    table = Table(title=f"Rapport de validation ({report.summary()})")
+    table.add_column("Niveau", style="bold", width=8)
+    table.add_column("Etape", width=12)
+    table.add_column("Controle", width=25)
     table.add_column("Message")
 
     for issue in report.issues:
@@ -230,24 +227,30 @@ def validate(
 def config(
     settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
 ) -> None:
-    """Display current configuration."""
+    """Affiche la configuration courante."""
     cfg = load_config(settings)
 
-    console.print("[bold]CNPS Pipeline Configuration[/bold]\n")
-    console.print(f"  Project root:    {cfg.paths.project_root}")
-    console.print(f"  Raw data:        {cfg.paths.raw_data}")
-    console.print(f"  Output:          {cfg.paths.output}")
-    console.print(f"  Models:          {cfg.paths.models}")
+    console.print("[bold]Configuration du pipeline CNPS[/bold]\n")
+    console.print(f"  Racine projet:      {cfg.paths.project_root}")
+    console.print(f"  Logs:               {cfg.paths.logs}")
     console.print()
-    console.print(f"  Estimation:      {cfg.modeling.estimation_method}")
-    console.print(f"  Imputations:     {cfg.modeling.n_imputations}")
-    console.print(f"  Min cell size:   {cfg.estimation.min_cell_size}")
-    console.print(f"  Confidence:      {cfg.estimation.confidence_level}")
-    console.print(f"  Parallelism:     {cfg.parallel.n_jobs} jobs ({cfg.parallel.backend})")
+    console.print(f"  MinIO endpoint:     {cfg.minio.endpoint}")
+    console.print(f"  MinIO bucket:       {cfg.minio.bucket}")
+    console.print(f"  Prefixe brut:       {cfg.minio.raw_prefix}")
+    console.print(f"  Prefixe traite:     {cfg.minio.processed_prefix}")
+    console.print(f"  Prefixe nettoye:    {cfg.minio.cleaned_prefix}")
+    console.print(f"  Prefixe modeles:    {cfg.minio.models_prefix}")
+    console.print(f"  Prefixe sortie:     {cfg.minio.output_prefix}")
+    console.print()
+    console.print(f"  Methode d'estimation: {cfg.modeling.estimation_method}")
+    console.print(f"  Imputations:          {cfg.modeling.n_imputations}")
+    console.print(f"  Taille min. cellule:  {cfg.estimation.min_cell_size}")
+    console.print(f"  Niveau de confiance:  {cfg.estimation.confidence_level}")
+    console.print(f"  Parallelisme:         {cfg.parallel.n_jobs} jobs ({cfg.parallel.backend})")
     console.print()
 
     dims_enabled = [d for d in cfg.dimensions if d.enabled]
-    console.print(f"  Dimensions:      {len(dims_enabled)} enabled")
+    console.print(f"  Dimensions:      {len(dims_enabled)} activees")
     for d in dims_enabled:
         console.print(f"    - {d.label} ({', '.join(d.group_by) or 'global'})")
 

@@ -6,25 +6,15 @@
 # =============================================================================
 
 # --- Chemins du projet ---
+# Toutes les donnees (brutes, intermediaires, modeles, exports, sessions)
+# vivent sur MinIO : voir la section minio ci-dessous. Le seul chemin local
+# necessaire est celui des logs d'execution.
 paths:
-  # Repertoire racine du projet source (cache local de travail uniquement -
-  # les donnees de reference vivent sur MinIO, voir section minio ci-dessous).
+  # Repertoire racine du projet source.
   # Laisser vide: resolu automatiquement vers la racine du depot par config.py
   project_root: ""
-  # Donnees brutes Excel (fichiers MM_YYYY.xlsx)
-  raw_data: "${project_root}/data/raw"
-  # Donnees converties en Parquet
-  processed_data: "${project_root}/data/processed"
-  # Donnees nettoyees
-  cleaned_data: "${project_root}/data/cleaned"
-  # Sorties (indicateurs, rapports)
-  output: "${project_root}/data/output"
-  # Modeles sauvegardes
-  models: "${project_root}/models"
   # Logs d'execution
   logs: "${project_root}/logs"
-  # Sessions
-  sessions: "${project_root}/sessions"
 
 # --- Parametres d'ingestion ---
 ingestion:
