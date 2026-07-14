@@ -1,24 +1,29 @@
 """
-Pipeline orchestrator.
+Orchestrateur du pipeline.
 
-Manages the sequential execution of all pipeline stages with:
-- Stage-level logging and timing
-- Error handling and graceful degradation
-- Session tracking (inputs, outputs, duration per stage)
-- Selective stage execution (run from/to a specific stage)
+Gere l'execution sequentielle des 12 etapes du pipeline avec :
+- Journalisation et chronometrage par etape
+- Gestion des erreurs et degradation gracieuse
+- Suivi de session (entrees, sorties, duree par etape)
+- Execution selective (d'une etape a une autre)
 
-The pipeline follows a strict DAG (directed acyclic graph) where each
-stage depends on the outputs of previous stages.
+Le pipeline suit un DAG strict (graphe acyclique dirige) ou chaque
+etape depend des sorties des etapes precedentes. Les modules d'etape
+sont nommes ``NN_nom.py`` (ex: ``01_lecture_fichiers.py``) pour que
+l'ordre d'execution soit visible directement dans l'explorateur de
+fichiers. Un tel nom n'est pas un identifiant Python valide apres un
+point (``cnps.01_lecture_fichiers`` ne s'importe pas avec une syntaxe
+``import`` normale) : on les charge donc via ``importlib.import_module``.
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import IntEnum
-from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -27,24 +32,48 @@ from cnps.config import PipelineConfig
 
 
 class Stage(IntEnum):
-    """Pipeline stages in execution order."""
-    INGEST = 1
-    HARMONIZE = 2
-    CLEAN = 3
-    INDIVIDUAL_BASE = 4
-    FIRM_BASE = 5
-    ANALYTICAL_BASE = 6
-    DECLARATION_MODEL = 7
-    IMPUTATION = 8
-    WEIGHTING = 9
-    ESTIMATION = 10
-    VALIDATION = 11
-    EXPORT = 12
+    """Etapes du pipeline, dans l'ordre d'execution."""
+    LECTURE_FICHIERS = 1
+    HARMONISATION_TYPES = 2
+    NETTOYAGE_DONNEES = 3
+    BASE_INDIVIDUS = 4
+    BASE_ENTREPRISES = 5
+    BASE_ANALYTIQUE = 6
+    MODELE_DECLARATION = 7
+    IMPUTATION_SALAIRES = 8
+    PONDERATION_FINALE = 9
+    ESTIMATION_INDICATEURS = 10
+    VALIDATION_QUALITE = 11
+    EXPORT_EXCEL = 12
+
+
+# Correspondance etape -> (module, fonction publique, libelle affiche)
+_STAGE_MODULES: dict[Stage, tuple[str, str, str]] = {
+    Stage.LECTURE_FICHIERS: ("cnps.01_lecture_fichiers", "lire_fichiers", "Lecture des fichiers"),
+    Stage.HARMONISATION_TYPES: ("cnps.02_harmonisation_types", "harmoniser_types", "Harmonisation des types"),
+    Stage.NETTOYAGE_DONNEES: ("cnps.03_nettoyage_donnees", "nettoyer_donnees", "Nettoyage des donnees"),
+    Stage.BASE_INDIVIDUS: ("cnps.04_base_individus", "construire_base_individus", "Base individus"),
+    Stage.BASE_ENTREPRISES: ("cnps.05_base_entreprises", "construire_base_entreprises", "Base entreprises"),
+    Stage.BASE_ANALYTIQUE: ("cnps.06_base_analytique", "construire_base_analytique", "Base analytique"),
+    Stage.MODELE_DECLARATION: ("cnps.07_modele_declaration", "ajuster_modele_declaration", "Modele de declaration"),
+    Stage.IMPUTATION_SALAIRES: ("cnps.08_imputation_salaires", "imputer_salaires", "Imputation des salaires"),
+    Stage.PONDERATION_FINALE: ("cnps.09_ponderation_finale", "calculer_poids_finaux", "Ponderation finale"),
+    Stage.ESTIMATION_INDICATEURS: ("cnps.10_estimation_indicateurs", "estimer_indicateurs", "Estimation des indicateurs"),
+    Stage.VALIDATION_QUALITE: ("cnps.11_validation_qualite", "valider_tout", "Validation qualite"),
+    Stage.EXPORT_EXCEL: ("cnps.12_export_excel", "exporter_indicateurs", "Export Excel"),
+}
+
+
+def _load_stage_function(stage: Stage):
+    """Charge dynamiquement la fonction publique d'un module d'etape numerote."""
+    module_name, func_name, _ = _STAGE_MODULES[stage]
+    module = importlib.import_module(module_name)
+    return getattr(module, func_name)
 
 
 @dataclass
 class StageResult:
-    """Result of a single pipeline stage."""
+    """Resultat d'une etape unique du pipeline."""
     stage: str
     status: str                     # "ok", "error", "skipped"
     duration_seconds: float
@@ -55,7 +84,7 @@ class StageResult:
 
 @dataclass
 class PipelineResult:
-    """Result of a full pipeline run."""
+    """Resultat d'une execution complete du pipeline."""
     session_id: str
     start_time: str
     end_time: str
@@ -67,14 +96,10 @@ class PipelineResult:
         return all(s.status in ("ok", "skipped") for s in self.stages)
 
 
-# ---------------------------------------------------------------------------
-# Stage runners
-# ---------------------------------------------------------------------------
-
 def _run_stage(name: str, func, *args, **kwargs) -> StageResult:
-    """Execute a stage with timing and error handling."""
+    """Execute une etape avec chronometrage et gestion d'erreur."""
     logger.info("=" * 60)
-    logger.info("STAGE: {}", name)
+    logger.info("ETAPE: {}", name)
     logger.info("=" * 60)
 
     t0 = time.perf_counter()
@@ -82,124 +107,62 @@ def _run_stage(name: str, func, *args, **kwargs) -> StageResult:
         result = func(*args, **kwargs)
         dt = time.perf_counter() - t0
         output = str(result) if result else ""
-        logger.info("Stage '{}' completed in {:.1f}s", name, dt)
+        logger.info("Etape '{}' terminee en {:.1f}s", name, dt)
         return StageResult(name, "ok", dt, output_path=output)
     except Exception as exc:
         dt = time.perf_counter() - t0
-        logger.error("Stage '{}' failed after {:.1f}s: {}", name, dt, exc)
+        logger.error("Etape '{}' echouee apres {:.1f}s: {}", name, dt, exc)
         return StageResult(name, "error", dt, error=str(exc))
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def run_pipeline(
     cfg: PipelineConfig,
-    from_stage: Stage = Stage.INGEST,
-    to_stage: Stage = Stage.EXPORT,
+    from_stage: Stage = Stage.LECTURE_FICHIERS,
+    to_stage: Stage = Stage.EXPORT_EXCEL,
 ) -> PipelineResult:
     """
-    Execute the pipeline from ``from_stage`` to ``to_stage``.
+    Execute le pipeline de ``from_stage`` a ``to_stage``.
 
     Parameters
     ----------
     cfg : PipelineConfig
-        Pipeline configuration.
+        Configuration du pipeline.
     from_stage : Stage
-        First stage to execute.
+        Premiere etape a executer.
     to_stage : Stage
-        Last stage to execute.
+        Derniere etape a executer.
 
     Returns
     -------
     PipelineResult
-        Summary of the pipeline run.
+        Resume de l'execution.
     """
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     start_time = datetime.now().isoformat()
     t_total = time.perf_counter()
 
-    logger.info("Pipeline started: session={}, stages={}->{}", session_id,
+    logger.info("Pipeline demarre : session={}, etapes={}->{}", session_id,
                 from_stage.name, to_stage.name)
 
     results: list[StageResult] = []
+    stages_to_run = [s for s in Stage if from_stage <= s <= to_stage]
 
-    # Import stage functions lazily to avoid circular imports
-    stage_funcs: dict[Stage, tuple[str, Any]] = {}
+    for stage in stages_to_run:
+        _, _, label = _STAGE_MODULES[stage]
 
-    if Stage.INGEST >= from_stage and Stage.INGEST <= to_stage:
-        from cnps.ingestion.excel_reader import ingest
-        stage_funcs[Stage.INGEST] = ("Ingestion (Excel -> Parquet)", lambda: ingest(cfg))
+        if stage == Stage.EXPORT_EXCEL:
+            # L'export a besoin des resultats d'estimation en memoire
+            estimer = _load_stage_function(Stage.ESTIMATION_INDICATEURS)
+            exporter = _load_stage_function(Stage.EXPORT_EXCEL)
+            result = _run_stage(label, lambda: exporter(cfg, estimer(cfg)))
+        else:
+            func = _load_stage_function(stage)
+            result = _run_stage(label, func, cfg)
 
-    if Stage.HARMONIZE >= from_stage and Stage.HARMONIZE <= to_stage:
-        from cnps.preparation.type_harmonizer import harmonize_types
-        stage_funcs[Stage.HARMONIZE] = ("Type Harmonisation", lambda: harmonize_types(cfg))
-
-    if Stage.CLEAN >= from_stage and Stage.CLEAN <= to_stage:
-        from cnps.preparation.cleaner import clean
-        stage_funcs[Stage.CLEAN] = ("Data Cleaning", lambda: clean(cfg))
-
-    if Stage.INDIVIDUAL_BASE >= from_stage and Stage.INDIVIDUAL_BASE <= to_stage:
-        from cnps.structuring.individual_base import build_individual_base
-        stage_funcs[Stage.INDIVIDUAL_BASE] = (
-            "Individual Base", lambda: build_individual_base(cfg),
-        )
-
-    if Stage.FIRM_BASE >= from_stage and Stage.FIRM_BASE <= to_stage:
-        from cnps.structuring.firm_base import build_firm_base
-        stage_funcs[Stage.FIRM_BASE] = ("Firm Base", lambda: build_firm_base(cfg))
-
-    if Stage.ANALYTICAL_BASE >= from_stage and Stage.ANALYTICAL_BASE <= to_stage:
-        from cnps.structuring.analytical_base import build_analytical_base
-        stage_funcs[Stage.ANALYTICAL_BASE] = (
-            "Analytical Base", lambda: build_analytical_base(cfg),
-        )
-
-    if Stage.DECLARATION_MODEL >= from_stage and Stage.DECLARATION_MODEL <= to_stage:
-        from cnps.modeling.declaration_model import fit_declaration_model
-        stage_funcs[Stage.DECLARATION_MODEL] = (
-            "Declaration Model", lambda: fit_declaration_model(cfg),
-        )
-
-    if Stage.IMPUTATION >= from_stage and Stage.IMPUTATION <= to_stage:
-        from cnps.modeling.imputation import impute_firm_salaries
-        stage_funcs[Stage.IMPUTATION] = (
-            "Multiple Imputation", lambda: impute_firm_salaries(cfg),
-        )
-
-    if Stage.WEIGHTING >= from_stage and Stage.WEIGHTING <= to_stage:
-        from cnps.modeling.weighting import compute_final_weights
-        stage_funcs[Stage.WEIGHTING] = (
-            "Final Weighting", lambda: compute_final_weights(cfg),
-        )
-
-    if Stage.ESTIMATION >= from_stage and Stage.ESTIMATION <= to_stage:
-        from cnps.estimation.estimator import estimate_all
-        stage_funcs[Stage.ESTIMATION] = ("Estimation", lambda: estimate_all(cfg))
-
-    if Stage.VALIDATION >= from_stage and Stage.VALIDATION <= to_stage:
-        from cnps.diagnostics.validation import run_all_validations
-        stage_funcs[Stage.VALIDATION] = (
-            "Validation", lambda: run_all_validations(cfg),
-        )
-
-    if Stage.EXPORT >= from_stage and Stage.EXPORT <= to_stage:
-        from cnps.estimation.estimator import estimate_all
-        from cnps.export.excel_export import export_indicators
-        stage_funcs[Stage.EXPORT] = (
-            "Export", lambda: export_indicators(cfg, estimate_all(cfg)),
-        )
-
-    # Execute stages
-    for stage_enum in sorted(stage_funcs.keys()):
-        name, func = stage_funcs[stage_enum]
-        result = _run_stage(name, func)
         results.append(result)
 
-        # Stop on error (unless it's a non-critical stage)
-        if result.status == "error" and stage_enum < Stage.VALIDATION:
-            logger.error("Pipeline halted at stage '{}'", name)
+        if result.status == "error" and stage < Stage.VALIDATION_QUALITE:
+            logger.error("Pipeline arrete a l'etape '{}'", label)
             break
 
     dt_total = time.perf_counter() - t_total
@@ -213,9 +176,9 @@ def run_pipeline(
         stages=results,
     )
 
-    # Save session metadata
-    session_dir = cfg.paths.sessions / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
+    # Sauvegarde des metadonnees de session sur MinIO
+    from cnps.storage import write_json
+    session_object = f"{cfg.minio.output_prefix}sessions/{session_id}/metadata.json"
     meta = {
         "session_id": session_id,
         "start_time": start_time,
@@ -228,11 +191,9 @@ def run_pipeline(
             for s in results
         ],
     }
-    (session_dir / "metadata.json").write_text(
-        json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8",
-    )
+    write_json(cfg.minio, session_object, meta)
 
-    status = "SUCCESS" if pipeline_result.success else "FAILED"
-    logger.info("Pipeline {}: {:.1f}s total", status, dt_total)
+    status = "SUCCES" if pipeline_result.success else "ECHEC"
+    logger.info("Pipeline {} : {:.1f}s au total", status, dt_total)
 
     return pipeline_result
