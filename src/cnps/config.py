@@ -24,15 +24,14 @@ from loguru import logger
 
 @dataclass(frozen=True)
 class PathsConfig:
-    """Resolved filesystem paths used by the pipeline."""
+    """Chemins locaux utilises par le pipeline.
+
+    Toutes les donnees (brutes, intermediaires, modeles, exports) vivent
+    sur MinIO (voir :class:`MinioConfig`) : le seul chemin local necessaire
+    est celui des logs d'execution.
+    """
     project_root: Path
-    raw_data: Path
-    processed_data: Path
-    cleaned_data: Path
-    output: Path
-    models: Path
     logs: Path
-    sessions: Path
 
 
 @dataclass(frozen=True)
@@ -200,10 +199,7 @@ def load_config(
     resolved = _resolve_paths(settings["paths"])
     paths = PathsConfig(**resolved)
 
-    # Ensure directories exist
-    for p in [paths.processed_data, paths.cleaned_data, paths.output,
-              paths.models, paths.logs, paths.sessions]:
-        p.mkdir(parents=True, exist_ok=True)
+    paths.logs.mkdir(parents=True, exist_ok=True)
 
     # --- Sections ---
     ingestion = IngestionConfig(**settings["ingestion"])
