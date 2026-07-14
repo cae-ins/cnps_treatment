@@ -13,7 +13,10 @@
       "Bash(cd /Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2 *)",
       "Bash(.venv/bin/python run.py --help)",
       "Bash(git commit -m ' *)",
-      "Bash(.venv/bin/cnps config *)"
+      "Bash(.venv/bin/cnps config *)",
+      "Bash(mc ls *)",
+      "Bash(mc cp *)",
+      "Bash(mc rm *)"
     ],
     "additionalDirectories": [
       "/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2"

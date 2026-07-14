@@ -68,26 +68,57 @@ estimation:
 
 # --- Stockage objet MinIO ---
 # Toutes les donnees du pipeline (brutes, intermediaires, modeles, exports)
-# vivent sur MinIO plutot que sur disque local : voir src/cnps/storage/.
+# vivent sur MinIO plutot que sur disque local : voir src/cnps/storage.py.
+#
+# Organisation en couches (medaillon) : chaque famille de donnees vit dans
+# un bucket different sur le serveur MinIO. "datalab" (voir ~/.mc/config.json)
+# est seulement l'alias mc local vers le serveur -- ce n'est PAS un bucket,
+# il ne doit jamais apparaitre dans un chemin bucket/prefixe ci-dessous.
+#
+# Qui lit / qui ecrit chaque bucket+prefixe (etapes numerotees = src/cnps/NN_*.py) :
+#   raw_bucket/raw_prefix         <- (source externe, deposee manuellement)
+#                                  -> LU par 01_lecture_fichiers.py
+#   processed_bucket/processed_prefix -> ECRIT par 01_lecture_fichiers.py (Excel -> Parquet)
+#                                  -> RE-ECRIT (en place) par 02_harmonisation_types.py
+#                                  -> LU par 03_nettoyage_donnees.py et audit_qualite.py
+#   cleaned_bucket/cleaned_prefix  -> ECRIT par 03_nettoyage_donnees.py (cnps_cleaned.parquet)
+#                                  -> ECRIT par 04_base_individus.py (individual_base.parquet)
+#                                  -> ECRIT par 05_base_entreprises.py (firm_base.parquet)
+#                                  -> ECRIT par 06_base_analytique.py (analytical_base.parquet)
+#                                  -> RE-ECRIT (en place) par 07_modele_declaration.py (firm_base.parquet + poids IPW)
+#                                  -> ECRIT par 08_imputation_salaires.py (firm_base_imputed.parquet)
+#                                  -> RE-ECRIT (en place) par 09_ponderation_finale.py (analytical_base.parquet + W_FINAL)
+#                                  -> LU par 10_estimation_indicateurs.py et 11_validation_qualite.py
+#   models_bucket/models_prefix    -> ECRIT par 07_modele_declaration.py (declaration_model.pkl)
+#                                  -> ECRIT par 08_imputation_salaires.py (imputation_model.pkl)
+#                                  -> LU par 11_validation_qualite.py
+#   output_bucket/output_prefix    -> ECRIT par 12_export_excel.py (indicateurs_cnps.xlsx)
+#                                  -> ECRIT par audit_qualite.py (audit_fichiers_cnps_*.xlsx)
+#                                  -> ECRIT par pipeline.py (sessions/{id}/metadata.json)
+#
+# Voir le README (section "Le fil d'execution") pour le detail complet
+# entrees/sorties de chaque etape.
 minio:
   # Adresse du serveur MinIO (reseau interne)
   endpoint: "192.168.1.230:30137"
-  # Bucket source des donnees CNPS
-  bucket: "staging"
-  # Prefixe dedie au pipeline, isole des autres donnees deja presentes dans le bucket
-  # Fichiers Excel bruts (MM_YYYY.xlsx), directement a la racine de cnps/
-  # ATTENTION: ce prefixe contient aussi des CSV sans rapport (ETAT_TRAVAILLEUR_*.csv)
-  # et un sous-dossier fichiers_mensuels/ : le code doit filtrer par extension/pattern,
-  # ne jamais lister ce prefixe sans filtre.
+  # Fichiers Excel bruts (MM_YYYY.xlsx).
+  # ATTENTION: ce bucket contient aussi des fichiers sans rapport avec le
+  # pipeline (CSV, autres sous-dossiers) : le code filtre toujours par
+  # extension/motif de nom (MM_YYYY.xlsx), ne liste jamais ce prefixe sans filtre.
+  raw_bucket: "staging"
   raw_prefix: "cnps/fichiers_mensuels/"
-  # Prefixe des parquets issus de l'ingestion (MM_YYYY.parquet) + registre de suivi
-  processed_prefix: "cnps/processed_data/"
-  # Prefixe des donnees nettoyees et des bases structurees
-  cleaned_prefix: "cnps/cleaned_data/"
-  # Prefixe des modeles sauvegardes (.pkl)
-  models_prefix: "cnps/models/"
-  # Prefixe des exports Excel finaux (indicateurs, rapports, audits)
-  output_prefix: "cnps/output/"
+  # Parquets issus de l'ingestion (MM_YYYY.parquet) + registre de suivi
+  processed_bucket: "silver"
+  processed_prefix: "cnps/"
+  # Donnees nettoyees et bases structurees (individus, entreprises, analytique)
+  cleaned_bucket: "gold"
+  cleaned_prefix: "cnps/"
+  # Modeles sauvegardes (.pkl)
+  models_bucket: "models"
+  models_prefix: "cnps/"
+  # Exports Excel finaux (indicateurs, rapports, audits, sessions)
+  output_bucket: "staging"
+  output_prefix: "cnps/exports_gold/"
   # Connexion chiffree (le serveur interne tourne en HTTP simple)
   secure: false
 
