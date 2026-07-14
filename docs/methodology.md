@@ -10,32 +10,47 @@ Le probleme central est la **non-declaration** : toutes les entreprises ne decla
 
 ## 2. Flux de donnees
 
+Toutes les donnees (entrees et sorties de chaque etape) vivent sur MinIO,
+jamais sur disque local. Chaque etape correspond a un fichier numerote
+dans `src/cnps/` (voir le [README](../README.md) pour le detail
+entrees/sorties de chacune) :
+
 ```
-Excel (MM_YYYY.xlsx)
+Excel bruts (raw_prefix/MM_YYYY.xlsx)
     |
     v
-[1. Ingestion] -----> Parquet (compression zstd)
+[01. lecture_fichiers] -------> Parquet (compression zstd)
     |
     v
-[2. Harmonisation] -> Types uniformes (dates, numeriques, identifiants)
+[02. harmonisation_types] ----> Types uniformes (dates, numeriques, identifiants)
     |
     v
-[3. Nettoyage] -----> Variables derivees + winsorisation
+[03. nettoyage_donnees] ------> Variables derivees + concatenation
     |
     v
-[4. Structuration] -> Base individuelle + Base entreprise-mois (panel equilibre)
+[04. base_individus] ---------> Base au niveau individu
     |
     v
-[5. Modelisation] --> Modele de declaration (logit) + Imputation multiple
+[05. base_entreprises] -------> Panel entreprise-mois equilibre
     |
     v
-[6. Ponderation] ---> Poids IPW ou AIPW (doublement robuste)
+[06. base_analytique] --------> Fusion individus + entreprises
     |
     v
-[7. Estimation] ----> Statistiques ponderees par dimension
+[07. modele_declaration] -----> Score de propension (logit) + poids IPW
     |
     v
-[8. Export] ---------> Excel formate avec IC (Rubin)
+[08. imputation_salaires] ----> Imputation multiple (M=5) des salaires manquants
+    |
+    v
+[09. ponderation_finale] -----> Poids final IPW ou AIPW (doublement robuste)
+    |
+    v
+[10. estimation_indicateurs] -> Statistiques ponderees par dimension (regles de Rubin)
+    |
+    +----------------------+
+    v                      v
+[11. validation_qualite]  [12. export_excel] --> indicateurs_cnps.xlsx (output_prefix)
 ```
 
 ---
