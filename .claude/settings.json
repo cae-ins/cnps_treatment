@@ -9,7 +9,13 @@
       "Read(//opt/homebrew/bin/**)",
       "Read(//usr/local/bin/**)",
       "Bash(brew --prefix)",
-      "Bash(/opt/homebrew/bin/python3.12 -c \"import platform; print\\(platform.machine\\(\\)\\)\")"
+      "Bash(/opt/homebrew/bin/python3.12 -c \"import platform; print\\(platform.machine\\(\\)\\)\")",
+      "Bash(cd /Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2 *)",
+      "Bash(.venv/bin/python run.py --help)",
+      "Bash(git commit -m ' *)"
+    ],
+    "additionalDirectories": [
+      "/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2"
     ]
   }
 }
