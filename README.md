@@ -66,23 +66,37 @@ MINIO_SECRET_KEY=votre_secret_key
 
 Sans ce fichier (ou ces variables d'environnement deja definies), le client utilise `minioadmin` / `minioadmin` par defaut, qui echouera contre un serveur reel.
 
-### `config/settings.yaml` — parametres et prefixes MinIO
+### `config/settings.yaml` — buckets et prefixes MinIO (organisation medaillon)
+
+Chaque famille de donnees vit dans un **bucket** MinIO distinct, avec son propre **prefixe** (chemin interne au bucket) :
 
 ```yaml
 minio:
-  endpoint: "192.168.1.230:30137"        # adresse du serveur MinIO (reseau interne)
-  bucket: "staging"                       # bucket source
-  raw_prefix: "cnps/fichiers_mensuels/"   # ou lire les Excel bruts (MM_YYYY.xlsx)
-  processed_prefix: "cnps/processed_data/" # ou ecrire les Parquets ingeres
-  cleaned_prefix: "cnps/cleaned_data/"     # ou ecrire les bases nettoyees/structurees
-  models_prefix: "cnps/models/"            # ou ecrire les modeles (.pkl)
-  output_prefix: "cnps/output/"            # ou ecrire les exports Excel finaux
-  secure: false                            # HTTP (true si le serveur exige HTTPS)
+  endpoint: "192.168.1.230:30137"    # adresse du serveur MinIO (reseau interne)
+
+  raw_bucket: "staging"               # Excel bruts (MM_YYYY.xlsx)
+  raw_prefix: "cnps/fichiers_mensuels/"
+
+  processed_bucket: "silver"          # Parquets issus de l'ingestion
+  processed_prefix: "cnps/"
+
+  cleaned_bucket: "gold"              # donnees nettoyees et bases structurees
+  cleaned_prefix: "cnps/"
+
+  models_bucket: "models"             # modeles sauvegardes (.pkl)
+  models_prefix: "cnps/"
+
+  output_bucket: "staging"            # exports Excel finaux
+  output_prefix: "cnps/exports_gold/"
+
+  secure: false                       # HTTP (true si le serveur exige HTTPS)
 ```
 
-**Pour changer ou le pipeline lit ses fichiers bruts** : modifier `raw_prefix`.
-**Pour changer ou les resultats sont stockes** : modifier `processed_prefix` / `cleaned_prefix` / `models_prefix` / `output_prefix` independamment.
+**Pour changer ou le pipeline lit ses fichiers bruts** : modifier `raw_bucket`/`raw_prefix`.
+**Pour changer ou les resultats sont stockes** : modifier le bucket et/ou le prefixe de la famille concernee (`processed_*`, `cleaned_*`, `models_*`, `output_*`) independamment des autres.
 
+> **Attention** : un *alias* `mc` (ex: `datalab` dans `~/.mc/config.json`) n'est **jamais** un bucket — c'est un raccourci local vers un serveur. Ne jamais faire figurer un alias dans `raw_bucket`/`raw_prefix`/etc., seulement le vrai nom du bucket sur le serveur (verifiable avec `mc ls <alias>/` : chaque ligne listee est un bucket).
+>
 > Le prefixe `raw_prefix` peut contenir d'autres fichiers sans rapport avec le pipeline (CSV, sous-dossiers). Le code ne liste jamais ce prefixe en confiance aveugle : il filtre systematiquement par extension `.xlsx` et par le motif de nom `MM_YYYY.xlsx` (regex `ingestion.filename_regex`).
 
 ### `config/dimensions.yaml` — dimensions d'analyse et statistiques
@@ -107,29 +121,29 @@ estimation:
 
 ### Le fil d'execution : 12 etapes numerotees, dependantes entre elles
 
-Chaque etape lit la sortie MinIO de la precedente et ecrit la sienne. **Elles sont sequentiellement dependantes** : lancer l'etape 5 sans avoir jamais lance l'etape 4 echoue (fichier source introuvable sur MinIO).
+Chaque etape lit la sortie MinIO de la precedente et ecrit la sienne. **Elles sont sequentiellement dependantes** : lancer l'etape 5 sans avoir jamais lance l'etape 4 echoue (fichier source introuvable sur MinIO). Rappel des buckets par defaut : `raw`=staging, `processed`=silver, `cleaned`=gold, `models`=models, `output`=staging.
 
-| # | Fichier | Fonction | Lit (MinIO) | Ecrit (MinIO) |
-|---|---------|----------|-------------|----------------|
-| 01 | `01_lecture_fichiers.py` | `lire_fichiers` | `raw_prefix/*.xlsx` (filtre `MM_YYYY.xlsx`) | `processed_prefix/MM_YYYY.parquet` + `.file_registry.json` |
-| 02 | `02_harmonisation_types.py` | `harmoniser_types` | `processed_prefix/*.parquet` | memes fichiers, types corriges (ecrasement) |
-| 03 | `03_nettoyage_donnees.py` | `nettoyer_donnees` | `processed_prefix/*.parquet` (tous) | `cleaned_prefix/cnps_cleaned.parquet` |
-| 04 | `04_base_individus.py` | `construire_base_individus` | `cleaned_prefix/cnps_cleaned.parquet` | `cleaned_prefix/individual_base.parquet` |
-| 05 | `05_base_entreprises.py` | `construire_base_entreprises` | `cleaned_prefix/individual_base.parquet` | `cleaned_prefix/firm_base.parquet` |
-| 06 | `06_base_analytique.py` | `construire_base_analytique` | `cleaned_prefix/{individual_base,firm_base}.parquet` | `cleaned_prefix/analytical_base.parquet` |
-| 07 | `07_modele_declaration.py` | `ajuster_modele_declaration` | `cleaned_prefix/firm_base.parquet` | memes fichier (+ `W_JT`, `P_HAT_JT`) + `models_prefix/declaration_model.pkl` |
-| 08 | `08_imputation_salaires.py` | `imputer_salaires` | `cleaned_prefix/firm_base.parquet` | `cleaned_prefix/firm_base_imputed.parquet` + `models_prefix/imputation_model.pkl` |
-| 09 | `09_ponderation_finale.py` | `calculer_poids_finaux` | `cleaned_prefix/analytical_base.parquet` | meme fichier (+ `W_FINAL`) |
-| 10 | `10_estimation_indicateurs.py` | `estimer_indicateurs` | `cleaned_prefix/analytical_base.parquet` (+ `firm_base_imputed.parquet` si present) | **rien** — DataFrame en memoire |
-| 11 | `11_validation_qualite.py` | `valider_tout` | `cleaned_prefix/*.parquet`, `models_prefix/*.pkl` | **rien** — rapport en memoire |
-| 12 | `12_export_excel.py` | `exporter_indicateurs` | resultats de l'etape 10 (en memoire) | `output_prefix/indicateurs_cnps.xlsx` |
+| # | Fichier | Fonction | Lit (bucket/prefixe) | Ecrit (bucket/prefixe) |
+|---|---------|----------|------------------------|--------------------------|
+| 01 | `01_lecture_fichiers.py` | `lire_fichiers` | `raw_bucket/raw_prefix/*.xlsx` (filtre `MM_YYYY.xlsx`) | `processed_bucket/processed_prefix/MM_YYYY.parquet` + `.file_registry.json` |
+| 02 | `02_harmonisation_types.py` | `harmoniser_types` | `processed_bucket/processed_prefix/*.parquet` | memes fichiers, types corriges (ecrasement) |
+| 03 | `03_nettoyage_donnees.py` | `nettoyer_donnees` | `processed_bucket/processed_prefix/*.parquet` (tous) | `cleaned_bucket/cleaned_prefix/cnps_cleaned.parquet` |
+| 04 | `04_base_individus.py` | `construire_base_individus` | `cleaned_bucket/cleaned_prefix/cnps_cleaned.parquet` | `cleaned_bucket/cleaned_prefix/individual_base.parquet` |
+| 05 | `05_base_entreprises.py` | `construire_base_entreprises` | `cleaned_bucket/cleaned_prefix/individual_base.parquet` | `cleaned_bucket/cleaned_prefix/firm_base.parquet` |
+| 06 | `06_base_analytique.py` | `construire_base_analytique` | `cleaned_bucket/cleaned_prefix/{individual_base,firm_base}.parquet` | `cleaned_bucket/cleaned_prefix/analytical_base.parquet` |
+| 07 | `07_modele_declaration.py` | `ajuster_modele_declaration` | `cleaned_bucket/cleaned_prefix/firm_base.parquet` | meme fichier (+ `W_JT`, `P_HAT_JT`) + `models_bucket/models_prefix/declaration_model.pkl` |
+| 08 | `08_imputation_salaires.py` | `imputer_salaires` | `cleaned_bucket/cleaned_prefix/firm_base.parquet` | `cleaned_bucket/cleaned_prefix/firm_base_imputed.parquet` + `models_bucket/models_prefix/imputation_model.pkl` |
+| 09 | `09_ponderation_finale.py` | `calculer_poids_finaux` | `cleaned_bucket/cleaned_prefix/analytical_base.parquet` | meme fichier (+ `W_FINAL`) |
+| 10 | `10_estimation_indicateurs.py` | `estimer_indicateurs` | `cleaned_bucket/cleaned_prefix/analytical_base.parquet` (+ `firm_base_imputed.parquet` si present) | **rien** — DataFrame en memoire |
+| 11 | `11_validation_qualite.py` | `valider_tout` | `cleaned_bucket/cleaned_prefix/*.parquet`, `models_bucket/models_prefix/*.pkl` | **rien** — rapport en memoire |
+| 12 | `12_export_excel.py` | `exporter_indicateurs` | resultats de l'etape 10 (en memoire) | `output_bucket/output_prefix/indicateurs_cnps.xlsx` |
 
 Hors sequence numerotee (outils a la demande) :
 
 | Fichier | Fonction | Lit | Ecrit |
 |---------|----------|-----|-------|
-| `audit_qualite.py` | `executer_audit` | `processed_prefix/*.parquet` (ou prefixe custom via `--input`) | `output_prefix/audit_fichiers_cnps_<horodatage>.xlsx` |
-| `storage.py` | primitives `read_*`/`write_*` | — | — (utilise par toutes les etapes ci-dessus) |
+| `audit_qualite.py` | `executer_audit` | `processed_bucket/processed_prefix/*.parquet` (ou bucket/prefixe custom via `--input-bucket`/`--input`) | `output_bucket/output_prefix/audit_fichiers_cnps_<horodatage>.xlsx` |
+| `storage.py` | primitives `read_*`/`write_*` (chaque fonction prend un `bucket` explicite) | — | — (utilise par toutes les etapes ci-dessus) |
 
 ### Commandes CLI
 
@@ -147,11 +161,11 @@ python run.py estimate    # etapes 10+12 : estimation + export Excel
 
 # --- Outils independants ---
 python run.py audit                                          # 8 controles qualite
-python run.py audit --input cnps/cleaned_data/ --salary-var SALAIRE_BRUT_MENS
+python run.py audit --input-bucket gold --input cnps/ --salary-var SALAIRE_BRUT_MENS
 python run.py validate                                       # controles donnees/modeles
 
 # --- Configuration ---
-python run.py config      # affiche bucket, prefixes, parametres actifs
+python run.py config      # affiche buckets, prefixes, parametres actifs
 ```
 
 Noms d'etape valides pour `--from`/`--to` : `LECTURE_FICHIERS`, `HARMONISATION_TYPES`, `NETTOYAGE_DONNEES`, `BASE_INDIVIDUS`, `BASE_ENTREPRISES`, `BASE_ANALYTIQUE`, `MODELE_DECLARATION`, `IMPUTATION_SALAIRES`, `PONDERATION_FINALE`, `ESTIMATION_INDICATEURS`, `VALIDATION_QUALITE`, `EXPORT_EXCEL`.
@@ -195,10 +209,10 @@ CNPS_TREATMENT_V2/
 
 ## Sorties finales
 
-| Fichier (sur MinIO, `output_prefix`) | Contenu |
+| Fichier (sur MinIO, `output_bucket/output_prefix`) | Contenu |
 |---------|---------|
 | `indicateurs_cnps.xlsx` | Indicateurs par dimension (un onglet par dimension) |
-| `rapport_validation.xlsx` | Rapport de validation (si exporte via `export_validation_report`) |
+| `rapport_validation.xlsx` | Rapport de validation (si exporte via `exporter_rapport_validation`) |
 | `audit_fichiers_cnps_<horodatage>.xlsx` | Rapport d'audit qualite (8 controles) |
 | `sessions/{ID}/metadata.json` | Metadonnees de chaque execution du pipeline (duree, statut par etape) |
 

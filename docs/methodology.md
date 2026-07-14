@@ -11,12 +11,13 @@ Le probleme central est la **non-declaration** : toutes les entreprises ne decla
 ## 2. Flux de donnees
 
 Toutes les donnees (entrees et sorties de chaque etape) vivent sur MinIO,
-jamais sur disque local. Chaque etape correspond a un fichier numerote
-dans `src/cnps/` (voir le [README](../README.md) pour le detail
-entrees/sorties de chacune) :
+jamais sur disque local, reparties sur plusieurs buckets distincts
+(organisation medaillon : raw/processed/cleaned/models/output). Chaque
+etape correspond a un fichier numerote dans `src/cnps/` (voir le
+[README](../README.md) pour le detail bucket+prefixe de chacune) :
 
 ```
-Excel bruts (raw_prefix/MM_YYYY.xlsx)
+Excel bruts (raw_bucket/raw_prefix/MM_YYYY.xlsx)
     |
     v
 [01. lecture_fichiers] -------> Parquet (compression zstd)
@@ -50,7 +51,7 @@ Excel bruts (raw_prefix/MM_YYYY.xlsx)
     |
     +----------------------+
     v                      v
-[11. validation_qualite]  [12. export_excel] --> indicateurs_cnps.xlsx (output_prefix)
+[11. validation_qualite]  [12. export_excel] --> indicateurs_cnps.xlsx (output_bucket/output_prefix)
 ```
 
 ---
