@@ -8,7 +8,6 @@ venv/
 
 # Data (stored on MinIO, not in git)
 data/
-*.xlsx
 *.parquet
 *.csv
 
