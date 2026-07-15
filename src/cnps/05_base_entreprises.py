@@ -151,13 +151,16 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
                     .alias(f"LAG_{col_name}")
                 )
 
-        # Taux de declaration passe (moyenne cumulee de D_JT)
+        # Taux de declaration passe (moyenne cumulee de D_JT).
+        # cum_sum / cum_count plutot que cum_mean (Expr.cum_mean n'existe
+        # que dans les versions recentes de Polars ; cum_sum/cum_count
+        # sont disponibles depuis beaucoup plus longtemps).
         if "D_JT" in firm_df.columns:
             firm_df = firm_df.with_columns(
-                pl.col("D_JT")
-                .cast(pl.Float64)
-                .cum_mean()
-                .over("ID_EMPLOYEUR")
+                (
+                    pl.col("D_JT").cast(pl.Float64).cum_sum().over("ID_EMPLOYEUR")
+                    / pl.col("D_JT").cum_count().over("ID_EMPLOYEUR")
+                )
                 .shift(1)
                 .over("ID_EMPLOYEUR")
                 .alias("TAUX_DECLARATION_PASSE")
