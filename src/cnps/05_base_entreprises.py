@@ -112,7 +112,11 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
 
         balanced = all_firms.join(all_periods, how="cross")
 
+        # MOIS/ANNEE existent des deux cotes (deja dans firm_df via group_cols,
+        # et dans balanced via all_periods) : on les retire de firm_df avant la
+        # jointure pour eviter que Polars ne les duplique en MOIS_right/ANNEE_right.
         join_cols = [c for c in ["ID_EMPLOYEUR", "PERIOD"] if c in firm_df.columns]
+        firm_df = firm_df.drop([c for c in ["MOIS", "ANNEE"] if c in balanced.columns], strict=False)
         firm_df = balanced.join(firm_df, on=join_cols, how="left")
 
         # Indicateur de declaration

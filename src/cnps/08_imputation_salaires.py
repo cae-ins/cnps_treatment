@@ -80,8 +80,14 @@ def _prepare_imputation_data(
     for col in cat_feats:
         df = df.with_columns(pl.col(col).cast(pl.Utf8).fill_null("INCONNU"))
 
+    # SALAIRE_MOYEN == 0 (entreprise declarante avec masse salariale nulle
+    # sur la periode) donne LOG_SALAIRE_MOYEN = log(0) = -inf : ces lignes
+    # sont exclues de l'ajustement, sinon LinearRegression echoue
+    # ("Input y contains infinity").
     df_declaring = df.filter(
-        (pl.col("D_JT") == 1) & pl.col("LOG_SALAIRE_MOYEN").is_not_null()
+        (pl.col("D_JT") == 1)
+        & pl.col("LOG_SALAIRE_MOYEN").is_not_null()
+        & pl.col("LOG_SALAIRE_MOYEN").is_finite()
     )
     df_missing = df.filter(pl.col("D_JT") == 0)
 
