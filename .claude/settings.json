@@ -16,7 +16,8 @@
       "Bash(.venv/bin/cnps config *)",
       "Bash(mc ls *)",
       "Bash(mc cp *)",
-      "Bash(mc rm *)"
+      "Bash(mc rm *)",
+      "Bash(jupyter nbconvert *)"
     ],
     "additionalDirectories": [
       "/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2"
