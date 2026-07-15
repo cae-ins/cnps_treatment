@@ -32,7 +32,7 @@ def construire_base_individus(cfg: PipelineConfig) -> str:
     Etapes
     ------
     1. Lecture du Parquet nettoye
-    2. Creation d'un identifiant d'observation unique (ID_INDIV + NUMERO_EMPLOYEUR + PERIOD)
+    2. Creation d'un identifiant d'observation unique (ID_INDIV + ID_EMPLOYEUR + PERIOD)
     3. Initialisation des poids individuels a 1
     4. Ecriture de la base individus
 
@@ -55,7 +55,7 @@ def construire_base_individus(cfg: PipelineConfig) -> str:
     logger.info("Construction de la base individus a partir de {} lignes", df.height)
 
     # Identifiant d'observation
-    id_parts = [c for c in ["ID_INDIV", "NUMERO_EMPLOYEUR", "PERIOD"] if c in df.columns]
+    id_parts = [c for c in ["ID_INDIV", "ID_EMPLOYEUR", "PERIOD"] if c in df.columns]
     if id_parts:
         df = df.with_columns(
             pl.concat_str(id_parts, separator="_").alias("OBS_ID")

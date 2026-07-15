@@ -14,7 +14,7 @@ dimensions:
 
   sector:
     label: "Secteur d'activite"
-    group_by: ["SECTEUR_ACTIVITE_COD"]
+    group_by: ["SECTEUR_ACTIVITE"]
     enabled: true
 
   age_employee:

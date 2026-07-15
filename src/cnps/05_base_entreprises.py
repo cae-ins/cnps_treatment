@@ -63,7 +63,7 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
                 df.height)
 
     # --- Agregation au niveau entreprise-periode ---
-    group_cols = [c for c in ["NUMERO_EMPLOYEUR", "PERIOD", "MOIS", "ANNEE"]
+    group_cols = [c for c in ["ID_EMPLOYEUR", "PERIOD", "MOIS", "ANNEE"]
                   if c in df.columns]
 
     salary_col = "SALAIRE_BRUT_MENS" if "SALAIRE_BRUT_MENS" in df.columns else "SALAIRE_BRUT"
@@ -93,7 +93,7 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
 
     # Attributs entreprise reportes tels quels (premiere valeur rencontree)
     firm_attrs = [c for c in [
-        "SECTEUR_ACTIVITE_COD", "COMMUNE", "CLASSE_EFFECTIF",
+        "SECTEUR_ACTIVITE", "COMMUNE", "CLASSE_EFFECTIF",
         "CLASSE_EFFECTIF_REDUITE", "AGE_ENTREPRISE_IMMAT", "CL_AGE_ENTREPRISE",
     ] if c in df.columns]
 
@@ -104,15 +104,15 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
     logger.info("Agrege en {} enregistrements entreprise-periode", firm_df.height)
 
     # --- Panel equilibre ---
-    if "NUMERO_EMPLOYEUR" in firm_df.columns and "PERIOD" in firm_df.columns:
-        all_firms = firm_df.select("NUMERO_EMPLOYEUR").unique()
+    if "ID_EMPLOYEUR" in firm_df.columns and "PERIOD" in firm_df.columns:
+        all_firms = firm_df.select("ID_EMPLOYEUR").unique()
         all_periods = firm_df.select(
             [c for c in ["PERIOD", "MOIS", "ANNEE"] if c in firm_df.columns]
         ).unique()
 
         balanced = all_firms.join(all_periods, how="cross")
 
-        join_cols = [c for c in ["NUMERO_EMPLOYEUR", "PERIOD"] if c in firm_df.columns]
+        join_cols = [c for c in ["ID_EMPLOYEUR", "PERIOD"] if c in firm_df.columns]
         firm_df = balanced.join(firm_df, on=join_cols, how="left")
 
         # Indicateur de declaration
@@ -139,15 +139,15 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
         )
 
     # --- Variables retardees ---
-    if "NUMERO_EMPLOYEUR" in firm_df.columns and "PERIOD" in firm_df.columns:
-        firm_df = firm_df.sort(["NUMERO_EMPLOYEUR", "PERIOD"])
+    if "ID_EMPLOYEUR" in firm_df.columns and "PERIOD" in firm_df.columns:
+        firm_df = firm_df.sort(["ID_EMPLOYEUR", "PERIOD"])
 
         for col_name in ["D_JT", "SALAIRE_MOYEN", "EFFECTIF_OBSERVE"]:
             if col_name in firm_df.columns:
                 firm_df = firm_df.with_columns(
                     pl.col(col_name)
                     .shift(1)
-                    .over("NUMERO_EMPLOYEUR")
+                    .over("ID_EMPLOYEUR")
                     .alias(f"LAG_{col_name}")
                 )
 
@@ -157,9 +157,9 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
                 pl.col("D_JT")
                 .cast(pl.Float64)
                 .cum_mean()
-                .over("NUMERO_EMPLOYEUR")
+                .over("ID_EMPLOYEUR")
                 .shift(1)
-                .over("NUMERO_EMPLOYEUR")
+                .over("ID_EMPLOYEUR")
                 .alias("TAUX_DECLARATION_PASSE")
             )
 

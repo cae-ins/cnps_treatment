@@ -32,19 +32,26 @@ from cnps.config import PipelineConfig
 
 
 class Stage(IntEnum):
-    """Etapes du pipeline, dans l'ordre d'execution."""
-    LECTURE_FICHIERS = 1
-    HARMONISATION_TYPES = 2
-    NETTOYAGE_DONNEES = 3
-    BASE_INDIVIDUS = 4
-    BASE_ENTREPRISES = 5
-    BASE_ANALYTIQUE = 6
-    MODELE_DECLARATION = 7
-    IMPUTATION_SALAIRES = 8
-    PONDERATION_FINALE = 9
-    ESTIMATION_INDICATEURS = 10
-    VALIDATION_QUALITE = 11
-    EXPORT_EXCEL = 12
+    """Etapes du pipeline, dans l'ordre d'execution.
+
+    Les valeurs sont espacees de 10 en 10 (plutot que 1, 2, 3...) pour
+    pouvoir inserer une etape annexe entre deux etapes existantes (ex:
+    JOINTURE_ANSTAT = 55 entre BASE_ENTREPRISES = 50 et BASE_ANALYTIQUE = 60)
+    sans avoir a renumeroter les fichiers ``NN_nom.py`` deja en place.
+    """
+    LECTURE_FICHIERS = 10
+    HARMONISATION_TYPES = 20
+    NETTOYAGE_DONNEES = 30
+    BASE_INDIVIDUS = 40
+    BASE_ENTREPRISES = 50
+    JOINTURE_ANSTAT = 55
+    BASE_ANALYTIQUE = 60
+    MODELE_DECLARATION = 70
+    IMPUTATION_SALAIRES = 80
+    PONDERATION_FINALE = 90
+    ESTIMATION_INDICATEURS = 100
+    VALIDATION_QUALITE = 110
+    EXPORT_EXCEL = 120
 
 
 # Correspondance etape -> (module, fonction publique, libelle affiche)
@@ -54,6 +61,7 @@ _STAGE_MODULES: dict[Stage, tuple[str, str, str]] = {
     Stage.NETTOYAGE_DONNEES: ("cnps.03_nettoyage_donnees", "nettoyer_donnees", "Nettoyage des donnees"),
     Stage.BASE_INDIVIDUS: ("cnps.04_base_individus", "construire_base_individus", "Base individus"),
     Stage.BASE_ENTREPRISES: ("cnps.05_base_entreprises", "construire_base_entreprises", "Base entreprises"),
+    Stage.JOINTURE_ANSTAT: ("cnps.05_1_jointure_anstat", "enrichir_avec_anstat", "Jointure ANSTAT (secteur CEPICI)"),
     Stage.BASE_ANALYTIQUE: ("cnps.06_base_analytique", "construire_base_analytique", "Base analytique"),
     Stage.MODELE_DECLARATION: ("cnps.07_modele_declaration", "ajuster_modele_declaration", "Modele de declaration"),
     Stage.IMPUTATION_SALAIRES: ("cnps.08_imputation_salaires", "imputer_salaires", "Imputation des salaires"),

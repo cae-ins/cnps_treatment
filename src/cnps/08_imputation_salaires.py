@@ -45,7 +45,7 @@ from cnps.config import PipelineConfig
 from cnps.storage import object_exists, read_parquet, write_parquet, write_pickle
 
 _CATEGORICAL_FEATURES = [
-    "SECTEUR_ACTIVITE_COD",
+    "SECTEUR_ACTIVITE",
     "CLASSE_EFFECTIF_REDUITE",
     "CL_AGE_ENTREPRISE",
 ]

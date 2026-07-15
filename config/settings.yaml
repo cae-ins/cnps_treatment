@@ -95,6 +95,8 @@ estimation:
 #   output_bucket/output_prefix    -> ECRIT par 12_export_excel.py (indicateurs_cnps.xlsx)
 #                                  -> ECRIT par audit_qualite.py (audit_fichiers_cnps_*.xlsx)
 #                                  -> ECRIT par pipeline.py (sessions/{id}/metadata.json)
+#                                  -> LU par 05bis_jointure_anstat.py (REQUETES_ANSTAT_MODULE_EMPLOYEURS.xlsx,
+#                                     depose manuellement dans raw_bucket/raw_prefix racine)
 #
 # Voir le README (section "Le fil d'execution") pour le detail complet
 # entrees/sorties de chaque etape.

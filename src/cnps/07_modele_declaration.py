@@ -56,7 +56,7 @@ from cnps.storage import object_exists, read_parquet, write_parquet, write_pickl
 
 # Covariables du modele de declaration (categorielles et numeriques)
 _CATEGORICAL_FEATURES = [
-    "SECTEUR_ACTIVITE_COD",
+    "SECTEUR_ACTIVITE",
     "CLASSE_EFFECTIF_REDUITE",
     "CL_AGE_ENTREPRISE",
 ]
@@ -186,8 +186,8 @@ def ajuster_modele_declaration(cfg: PipelineConfig) -> str:
     )
 
     # Reintegration dans la base complete (jointure pour preserver les lignes non modelisees)
-    if "NUMERO_EMPLOYEUR" in df_model.columns and "PERIOD" in df_model.columns:
-        join_cols = ["NUMERO_EMPLOYEUR", "PERIOD"]
+    if "ID_EMPLOYEUR" in df_model.columns and "PERIOD" in df_model.columns:
+        join_cols = ["ID_EMPLOYEUR", "PERIOD"]
         weights_df = df_model.select(join_cols + ["W_JT", "P_HAT_JT"])
         df_orig = read_parquet(cfg.minio, cleaned_bucket, firm_object).drop(["W_JT"], strict=False)
         df_updated = df_orig.join(weights_df, on=join_cols, how="left")

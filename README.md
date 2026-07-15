@@ -119,9 +119,12 @@ estimation:
 
 ## Utilisation
 
-### Le fil d'execution : 12 etapes numerotees, dependantes entre elles
+### Le fil d'execution : 13 etapes numerotees, dependantes entre elles
 
 Chaque etape lit la sortie MinIO de la precedente et ecrit la sienne. **Elles sont sequentiellement dependantes** : lancer l'etape 5 sans avoir jamais lance l'etape 4 echoue (fichier source introuvable sur MinIO). Rappel des buckets par defaut : `raw`=staging, `processed`=silver, `cleaned`=gold, `models`=models, `output`=staging.
+
+Les numeros d'etape internes (`Stage`, dans `pipeline.py`) sont espaces de 10 en 10 (10, 20, 30...) pour
+permettre d'inserer une etape annexe (comme 05.1) sans renumeroter les fichiers existants.
 
 | # | Fichier | Fonction | Lit (bucket/prefixe) | Ecrit (bucket/prefixe) |
 |---|---------|----------|------------------------|--------------------------|
@@ -130,6 +133,7 @@ Chaque etape lit la sortie MinIO de la precedente et ecrit la sienne. **Elles so
 | 03 | `03_nettoyage_donnees.py` | `nettoyer_donnees` | `processed_bucket/processed_prefix/*.parquet` (tous) | `cleaned_bucket/cleaned_prefix/cnps_cleaned.parquet` |
 | 04 | `04_base_individus.py` | `construire_base_individus` | `cleaned_bucket/cleaned_prefix/cnps_cleaned.parquet` | `cleaned_bucket/cleaned_prefix/individual_base.parquet` |
 | 05 | `05_base_entreprises.py` | `construire_base_entreprises` | `cleaned_bucket/cleaned_prefix/individual_base.parquet` | `cleaned_bucket/cleaned_prefix/firm_base.parquet` |
+| 05.1 | `05_1_jointure_anstat.py` | `enrichir_avec_anstat` | `cleaned_bucket/cleaned_prefix/{firm_base,cnps_cleaned}.parquet` + `raw_bucket/cnps/REQUETES_ANSTAT_MODULE_EMPLOYEURS.xlsx` (referentiel externe, depose manuellement) | `cleaned_bucket/cleaned_prefix/firm_base.parquet` (ecrasement, colonnes `SECTEUR_ACTIVITE_ANSTAT`, `FORME_JURIDIQUE_ANSTAT`, `NUMERO_RCCM`, `NUMERO_DFE` ajoutees) |
 | 06 | `06_base_analytique.py` | `construire_base_analytique` | `cleaned_bucket/cleaned_prefix/{individual_base,firm_base}.parquet` | `cleaned_bucket/cleaned_prefix/analytical_base.parquet` |
 | 07 | `07_modele_declaration.py` | `ajuster_modele_declaration` | `cleaned_bucket/cleaned_prefix/firm_base.parquet` | meme fichier (+ `W_JT`, `P_HAT_JT`) + `models_bucket/models_prefix/declaration_model.pkl` |
 | 08 | `08_imputation_salaires.py` | `imputer_salaires` | `cleaned_bucket/cleaned_prefix/firm_base.parquet` | `cleaned_bucket/cleaned_prefix/firm_base_imputed.parquet` + `models_bucket/models_prefix/imputation_model.pkl` |
@@ -182,13 +186,14 @@ CNPS_TREATMENT_V2/
 |-- src/cnps/
 |   |-- config.py                # chargement de la configuration (YAML + .env)
 |   |-- storage.py                # primitives de lecture/ecriture MinIO
-|   |-- pipeline.py               # orchestrateur (enchaine les etapes 01-12)
+|   |-- pipeline.py               # orchestrateur (enchaine les etapes 01-12 + 05.1)
 |   |-- cli.py                    # commandes CLI (typer)
 |   |-- 01_lecture_fichiers.py    # Excel -> Parquet
 |   |-- 02_harmonisation_types.py # types uniformes (dates, numeriques, ID)
 |   |-- 03_nettoyage_donnees.py   # concatenation + variables derivees
 |   |-- 04_base_individus.py      # vue par salarie
 |   |-- 05_base_entreprises.py    # panel entreprise-mois equilibre
+|   |-- 05_1_jointure_anstat.py   # enrichissement secteur CEPICI (referentiel ANSTAT)
 |   |-- 06_base_analytique.py     # fusion individus + entreprises
 |   |-- 07_modele_declaration.py  # score de propension (logit) + poids IPW
 |   |-- 08_imputation_salaires.py # imputation multiple (salaires manquants)

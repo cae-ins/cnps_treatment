@@ -51,7 +51,7 @@ def construire_base_analytique(cfg: PipelineConfig) -> str:
 
     # Selectionne les colonnes entreprise a joindre (evite les doublons)
     indiv_cols = set(indiv.columns)
-    firm_join_cols = ["NUMERO_EMPLOYEUR", "PERIOD"]
+    firm_join_cols = ["ID_EMPLOYEUR", "PERIOD"]
     firm_value_cols = [
         c for c in firm.columns
         if c not in indiv_cols or c in firm_join_cols

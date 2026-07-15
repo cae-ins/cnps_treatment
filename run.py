@@ -28,9 +28,10 @@ Usage — pipeline complet ou par etapes
         l'etape 02 (bucket processed_bucket/processed_prefix, *.parquet)
         existe deja sur MinIO.
         Noms d'etape valides : LECTURE_FICHIERS, HARMONISATION_TYPES,
-        NETTOYAGE_DONNEES, BASE_INDIVIDUS, BASE_ENTREPRISES, BASE_ANALYTIQUE,
-        MODELE_DECLARATION, IMPUTATION_SALAIRES, PONDERATION_FINALE,
-        ESTIMATION_INDICATEURS, VALIDATION_QUALITE, EXPORT_EXCEL.
+        NETTOYAGE_DONNEES, BASE_INDIVIDUS, BASE_ENTREPRISES, JOINTURE_ANSTAT,
+        BASE_ANALYTIQUE, MODELE_DECLARATION, IMPUTATION_SALAIRES,
+        PONDERATION_FINALE, ESTIMATION_INDICATEURS, VALIDATION_QUALITE,
+        EXPORT_EXCEL.
 
 Usage — raccourcis (groupes d'etapes courants)
 ------------------------------------------------
@@ -40,9 +41,15 @@ Usage — raccourcis (groupes d'etapes courants)
         Independant : peut tourner seul, c'est le point d'entree du pipeline.
 
     python run.py clean
-        Etapes 03 a 06. LIT : processed_bucket/processed_prefix/*.parquet (sortie de ingest).
-        ECRIT : cleaned_bucket/cleaned_prefix/{cnps_cleaned,individual_base,firm_base,
-        analytical_base}.parquet.
+        Etapes 03 a 06 (inclut la jointure ANSTAT, etape 05.1). LIT :
+        processed_bucket/processed_prefix/*.parquet (sortie de ingest), et
+        raw_bucket/cnps/REQUETES_ANSTAT_MODULE_EMPLOYEURS.xlsx (referentiel
+        externe depose manuellement, etape 05.1 uniquement).
+        ECRIT : cleaned_bucket/cleaned_prefix/{cnps_cleaned,individual_base,
+        firm_base,analytical_base}.parquet. La jointure ANSTAT (05.1)
+        enrichit firm_base.parquet en place avec SECTEUR_ACTIVITE_ANSTAT,
+        FORME_JURIDIQUE_ANSTAT, NUMERO_RCCM, NUMERO_DFE (colonnes ajoutees,
+        aucune ligne perdue si une entreprise ne trouve pas de correspondance).
         DEPENDANT : echoue si `ingest` n'a jamais ete lance (aucun parquet
         source a nettoyer).
 

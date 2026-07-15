@@ -215,10 +215,10 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
             .alias("CL_AGE_ENTREPRISE")
         )
 
-    if "EFFECTIF" in df.columns:
+    if "EFFECTIF_SALARIES" in df.columns:
         df = df.with_columns(
-            _classify("EFFECTIF", _FIRM_SIZE_DETAILED).alias("CLASSE_EFFECTIF"),
-            _classify("EFFECTIF", _FIRM_SIZE_REDUCED).alias("CLASSE_EFFECTIF_REDUITE"),
+            _classify("EFFECTIF_SALARIES", _FIRM_SIZE_DETAILED).alias("CLASSE_EFFECTIF"),
+            _classify("EFFECTIF_SALARIES", _FIRM_SIZE_REDUCED).alias("CLASSE_EFFECTIF_REDUITE"),
         )
 
     # --- 3. Ecriture ---

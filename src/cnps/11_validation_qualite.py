@@ -95,7 +95,7 @@ def valider_donnees(cfg: PipelineConfig) -> ValidationReport:
         "INFO", "data", "row_count", f"{df.height:,} lignes",
     ))
 
-    required = ["ID_INDIV", "NUMERO_EMPLOYEUR", "PERIOD"]
+    required = ["ID_INDIV", "ID_EMPLOYEUR", "PERIOD"]
     for col in required:
         if col not in df.columns:
             report.issues.append(ValidationIssue(
@@ -119,7 +119,7 @@ def valider_donnees(cfg: PipelineConfig) -> ValidationReport:
                 f"{above:,} lignes avec {salary_col} > {hi:,.0f}",
             ))
 
-    id_cols = [c for c in ["ID_INDIV", "NUMERO_EMPLOYEUR", "PERIOD"] if c in df.columns]
+    id_cols = [c for c in ["ID_INDIV", "ID_EMPLOYEUR", "PERIOD"] if c in df.columns]
     if id_cols:
         n_unique = df.select(id_cols).unique().height
         n_dup = df.height - n_unique

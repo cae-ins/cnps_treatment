@@ -137,7 +137,7 @@ def clean(
     settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Execute le nettoyage et la structuration des bases."""
+    """Execute le nettoyage et la structuration des bases (inclut la jointure ANSTAT)."""
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
     run_pipeline(cfg, Stage.NETTOYAGE_DONNEES, Stage.BASE_ANALYTIQUE)
