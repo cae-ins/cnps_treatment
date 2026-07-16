@@ -126,6 +126,7 @@ def _run_stage(name: str, func, *args, **kwargs) -> StageResult:
     except Exception as exc:
         dt = time.perf_counter() - t0
         logger.error("Etape '{}' echouee apres {:.1f}s: {}", name, dt, exc)
+        logger.exception(exc)
         return StageResult(name, "error", dt, error=str(exc))
 
 
