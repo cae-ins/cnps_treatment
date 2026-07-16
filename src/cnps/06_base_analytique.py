@@ -24,7 +24,7 @@ from cnps.storage import object_exists, read_parquet, write_parquet
 def construire_base_analytique(cfg: PipelineConfig) -> str:
     """
     Fusionne les bases individus et entreprises en base analytique.
-
+Don
     Parameters
     ----------
     cfg : PipelineConfig

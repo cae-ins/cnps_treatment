@@ -28,7 +28,7 @@ Usage — pipeline complet ou par etapes
         l'etape 02 (bucket processed_bucket/processed_prefix, *.parquet)
         existe deja sur MinIO.
         Noms d'etape valides : LECTURE_FICHIERS, HARMONISATION_TYPES,
-        NETTOYAGE_DONNEES, BASE_INDIVIDUS, BASE_ENTREPRISES, JOINTURE_ANSTAT,
+        NETTOYAGE_DONNEES, BASE_INDIVIDUS, BASE_ENTREPRISES,
         BASE_ANALYTIQUE, MODELE_DECLARATION, IMPUTATION_SALAIRES,
         PONDERATION_FINALE, ESTIMATION_INDICATEURS, VALIDATION_QUALITE,
         EXPORT_EXCEL.
@@ -41,15 +41,9 @@ Usage — raccourcis (groupes d'etapes courants)
         Independant : peut tourner seul, c'est le point d'entree du pipeline.
 
     python run.py clean
-        Etapes 03 a 06 (inclut la jointure ANSTAT, etape 05.1). LIT :
-        processed_bucket/processed_prefix/*.parquet (sortie de ingest), et
-        raw_bucket/cnps/REQUETES_ANSTAT_MODULE_EMPLOYEURS.xlsx (referentiel
-        externe depose manuellement, etape 05.1 uniquement).
-        ECRIT : cleaned_bucket/cleaned_prefix/{cnps_cleaned,individual_base,
-        firm_base,analytical_base}.parquet. La jointure ANSTAT (05.1)
-        enrichit firm_base.parquet en place avec SECTEUR_ACTIVITE_ANSTAT,
-        FORME_JURIDIQUE_ANSTAT, NUMERO_RCCM, NUMERO_DFE (colonnes ajoutees,
-        aucune ligne perdue si une entreprise ne trouve pas de correspondance).
+        Etapes 03 a 06. LIT : processed_bucket/processed_prefix/*.parquet
+        (sortie de ingest). ECRIT : cleaned_bucket/cleaned_prefix/
+        {cnps_cleaned,individual_base,firm_base,analytical_base}.parquet.
         DEPENDANT : echoue si `ingest` n'a jamais ete lance (aucun parquet
         source a nettoyer).
 
@@ -71,6 +65,19 @@ Usage — raccourcis (groupes d'etapes courants)
 
 Usage — outils independants (hors sequence 01-12)
 -----------------------------------------------------
+    python run.py enrich-anstat
+        LIT : cleaned_bucket/cleaned_prefix/{firm_base,cnps_cleaned}.parquet
+        (sortie de `clean`) + raw_bucket/cnps/REQUETES_ANSTAT_MODULE_EMPLOYEURS.xlsx
+        (referentiel externe, depose manuellement sur MinIO).
+        ECRIT : cleaned_bucket/cleaned_prefix/firm_base.parquet (ecrasement,
+        colonnes SECTEUR_ACTIVITE_ANSTAT, FORME_JURIDIQUE_ANSTAT, NUMERO_RCCM,
+        NUMERO_DFE ajoutees). Jointure sur RAISON_SOCIALE normalisee (~96.5%
+        de correspondance) : n'affecte pas SECTEUR_ACTIVITE (deja quasi complet
+        nativement dans les donnees CNPS, ~0.01% de valeurs manquantes) --
+        ajoute une nomenclature CEPICI complementaire, pas un correctif.
+        HORS SEQUENCE : n'est jamais execute par `run`, `clean`, ou aucun
+        autre raccourci. A lancer explicitement, apres `clean`.
+
     python run.py audit
         LIT : processed_bucket/processed_prefix/*.parquet par defaut
         (ou --input-bucket/--input pour un autre bucket/prefixe).

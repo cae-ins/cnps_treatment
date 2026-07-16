@@ -15,6 +15,10 @@ Exemples d'utilisation::
     # Estimation et export seuls
     cnps estimate
 
+    # Enrichissement ANSTAT (secteur CEPICI, RCCM, DFE) -- outil independant,
+    # hors sequence du pipeline, a lancer apres "cnps clean"
+    cnps enrich-anstat
+
     # Audit qualite (rapport Excel avec 8 controles)
     cnps audit
     cnps audit --input cnps/processed_data/ --salary-var SALAIRE_BRUT_MENS
@@ -137,7 +141,7 @@ def clean(
     settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Execute le nettoyage et la structuration des bases (inclut la jointure ANSTAT)."""
+    """Execute le nettoyage et la structuration des bases."""
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
     run_pipeline(cfg, Stage.NETTOYAGE_DONNEES, Stage.BASE_ANALYTIQUE)
@@ -163,6 +167,27 @@ def estimate(
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
     run_pipeline(cfg, Stage.ESTIMATION_INDICATEURS, Stage.EXPORT_EXCEL)
+
+
+@app.command()
+def enrich_anstat(
+    settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """
+    Enrichit firm_base.parquet avec le referentiel ANSTAT (secteur CEPICI,
+    forme juridique, RCCM, DFE), via jointure sur RAISON_SOCIALE normalisee.
+
+    Outil independant, hors de la sequence numerotee du pipeline (n'est PAS
+    execute par `cnps run`) : lancer explicitement apres `cnps clean`
+    (necessite que firm_base.parquet existe deja).
+    """
+    cfg = load_config(settings)
+    _setup_logging(cfg, verbose)
+
+    anstat_module = importlib.import_module("cnps.05_1_jointure_anstat")
+    out = anstat_module.enrichir_avec_anstat(cfg)
+    console.print(f"[bold green]Base entreprises enrichie (ANSTAT):[/bold green] {out}")
 
 
 @app.command()
