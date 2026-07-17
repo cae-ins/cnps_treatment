@@ -136,7 +136,7 @@ def run_pipeline(
     to_stage: Stage = Stage.EXPORT_EXCEL,
 ) -> PipelineResult:
     """
-    Execute le pipeline de ``from_stage`` a ``to_stage``.
+    OExecute le pipeline de ``from_stage`` a ``to_stage``.
 
     Parameters
     ----------
