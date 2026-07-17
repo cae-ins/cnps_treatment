@@ -105,9 +105,10 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
     Etapes
     ------
     1. Concatenation de tous les Parquets mensuels
-    2. Calcul des variables derivees (ages, anciennete, classes)
-    3. Winsorisation des valeurs extremes de salaire
-    4. Ecriture du Parquet nettoye
+    2. Regles metier : doublons, types d'employes exclus, salaire minimum
+    3. Calcul des variables derivees (ages, anciennete, classes)
+    4. Winsorisation des valeurs extremes de salaire
+    5. Ecriture du Parquet nettoye
 
     Parameters
     ----------
@@ -144,12 +145,34 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
     df = pl.concat(aligned, how="vertical")
     logger.info("Concatene : {} lignes, {} colonnes", df.height, df.width)
 
+    # --- 1bis. Regles metier (filtres) ---
+    if cfg.cleaning.remove_duplicates:
+        n_avant = df.height
+        df = df.unique()
+        logger.info("Doublons supprimes : {} -> {} lignes", n_avant, df.height)
+
+    if "TYPE_SALARIE" in df.columns and cfg.cleaning.exclude_employee_types:
+        n_avant = df.height
+        df = df.filter(
+            ~pl.col("TYPE_SALARIE").is_in(cfg.cleaning.exclude_employee_types)
+        )
+        logger.info("Types d'employes exclus {} : {} -> {} lignes",
+                     cfg.cleaning.exclude_employee_types, n_avant, df.height)
+
+    if "SALAIRE_BRUT" in df.columns:
+        n_avant = df.height
+        df = df.filter(
+            pl.col("SALAIRE_BRUT").is_null() | (pl.col("SALAIRE_BRUT") >= cfg.cleaning.min_salary)
+        )
+        logger.info("Salaires sous le seuil minimum ({:.0f}) exclus : {} -> {} lignes",
+                     cfg.cleaning.min_salary, n_avant, df.height)
+
     # --- 2. Variables derivees ---
     ref_date = date.today()
 
     if "SALAIRE_BRUT" in df.columns and "DUREE_TRAVAILLEE" in df.columns:
         df = df.with_columns(
-            (pl.col("SALAIRE_BRUT") / pl.col("DUREE_TRAVAILLEE").clip(1, 12) * 12)
+            (pl.col("SALAIRE_BRUT") / pl.col("DUREE_TRAVAILLEE").clip(1, cfg.cleaning.max_duration) * 12)
             .alias("SALAIRE_BRUT_MENS")
         )
 
