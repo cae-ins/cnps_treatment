@@ -153,6 +153,20 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
             .alias("SALAIRE_BRUT_MENS")
         )
 
+        # --- Winsorisation des valeurs extremes de salaire (Tukey, 1977) ---
+        # Ecrete (sans supprimer les lignes) au-dela des percentiles configures :
+        # limite l'influence des erreurs de saisie / cas extremes sur la
+        # moyenne, la variance et les autres estimateurs ponderes (etape 10).
+        lo, hi = df.select(
+            pl.col("SALAIRE_BRUT_MENS").quantile(cfg.cleaning.winsor_lower).alias("lo"),
+            pl.col("SALAIRE_BRUT_MENS").quantile(cfg.cleaning.winsor_upper).alias("hi"),
+        ).row(0)
+        df = df.with_columns(
+            pl.col("SALAIRE_BRUT_MENS").clip(lo, hi).alias("SALAIRE_BRUT_MENS")
+        )
+        logger.info("Winsorisation SALAIRE_BRUT_MENS : bornes [{:.0f}, {:.0f}] (p{:.0f}/p{:.0f})",
+                    lo, hi, cfg.cleaning.winsor_lower * 100, cfg.cleaning.winsor_upper * 100)
+
     if "DATE_NAISSANCE" in df.columns:
         df = df.with_columns(
             ((pl.lit(ref_date) - pl.col("DATE_NAISSANCE")).dt.total_days() / 365.25)
