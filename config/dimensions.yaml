@@ -17,6 +17,8 @@ dimensions:
     group_by: ["SECTEUR_ACTIVITE"]
     enabled: true
 
+
+
   age_employee:
     label: "Tranche d'age des employes"
     group_by: ["CL_AGE_EMPLOYE"]

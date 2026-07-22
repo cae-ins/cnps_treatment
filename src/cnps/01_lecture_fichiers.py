@@ -29,7 +29,7 @@ import polars as pl
 from joblib import Parallel, delayed
 from loguru import logger
 
-from cnps.config import MinioConfig, PipelineConfig
+from cnps.config import MinioConfig, PipelineConfig, load_config
 from cnps.storage import (
     list_objects,
     object_exists,
@@ -244,3 +244,38 @@ def lire_fichiers(cfg: PipelineConfig) -> list[dict]:
     logger.info("Ingestion terminee : {}/{} fichiers traites avec succes", ok, len(to_process))
 
     return results
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(
+        description=__doc__.strip().splitlines()[0] if __doc__ else None
+    )
+    parser.add_argument("--settings", "-s", type=Path, default=None)
+    parser.add_argument("--dimensions", "-d", type=Path, default=None)
+    parser.add_argument("--verbose", "-v", action="store_true")
+    args = parser.parse_args()
+
+    cfg = load_config(args.settings, args.dimensions)
+
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level="DEBUG" if args.verbose else "INFO",
+        colorize=True,
+        format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
+    )
+    logger.add(
+        str(cfg.paths.logs / f"{Path(__file__).stem}.log"),
+        level="DEBUG", rotation="10 MB", retention="30 days", encoding="utf-8",
+    )
+
+    try:
+        lire_fichiers(cfg)
+        logger.info("Termine avec succes.")
+    except Exception as exc:
+        logger.exception("Echec de l'etape: {}", exc)
+        sys.exit(1)

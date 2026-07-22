@@ -18,7 +18,7 @@ import io
 import polars as pl
 from loguru import logger
 
-from cnps.config import PipelineConfig
+from cnps.config import PipelineConfig, load_config
 from cnps.storage import write_workbook
 
 import importlib
@@ -164,3 +164,44 @@ def exporter_rapport_validation(
     write_workbook(cfg.minio, cfg.minio.output_bucket, out_object, _write)
     logger.info("Rapport de validation exporte vers {}", out_object)
     return out_object
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(
+        description=__doc__.strip().splitlines()[0] if __doc__ else None
+    )
+    parser.add_argument("--settings", "-s", type=Path, default=None)
+    parser.add_argument("--dimensions", "-d", type=Path, default=None)
+    parser.add_argument("--verbose", "-v", action="store_true")
+    args = parser.parse_args()
+
+    cfg = load_config(args.settings, args.dimensions)
+
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level="DEBUG" if args.verbose else "INFO",
+        colorize=True,
+        format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
+    )
+    logger.add(
+        str(cfg.paths.logs / f"{Path(__file__).stem}.log"),
+        level="DEBUG", rotation="10 MB", retention="30 days", encoding="utf-8",
+    )
+
+    try:
+        # Cas particulier : l'export a besoin du DataFrame de resultats de
+        # l'etape 10 (estimation) en memoire -- il n'existe pas sur MinIO en
+        # tant que tel. On reproduit ici ce que fait pipeline.py::run_pipeline
+        # pour EXPORT_EXCEL : ré-executer l'estimation avant l'export.
+        estimer = importlib.import_module("cnps.10_estimation_indicateurs").estimer_indicateurs
+        results = estimer(cfg)
+        exporter_indicateurs(cfg, results)
+        logger.info("Termine avec succes.")
+    except Exception as exc:
+        logger.exception("Echec de l'etape: {}", exc)
+        sys.exit(1)
