@@ -139,7 +139,7 @@ def calculer_poids_finaux(cfg: PipelineConfig) -> str:
     df = read_parquet(cfg.minio, bucket, analytical_object)
     method = cfg.modeling.estimation_method
 
-    logger.info("Calcul des poids finaux avec la methode : {}", method)
+    logger.info("Calcul des poids finaux avec la methode : {} ({} lignes)", method, df.height)
 
     if method == "aipw" and "P_HAT_JT" in df.columns:
         salary_col = "SALAIRE_BRUT_MENS" if "SALAIRE_BRUT_MENS" in df.columns else "SALAIRE_BRUT"
@@ -175,14 +175,19 @@ def calculer_poids_finaux(cfg: PipelineConfig) -> str:
 
     # Normalisation des poids par strate (periode)
     if "PERIOD" in df.columns:
+        n_periodes = df["PERIOD"].n_unique()
         df = df.with_columns(
             (pl.col("W_FINAL") / pl.col("W_FINAL").mean().over("PERIOD"))
             .alias("W_FINAL")
         )
+        logger.info("Poids normalises par periode ({} periodes, moyenne=1.0 sur chacune)", n_periodes)
 
     write_parquet(cfg.minio, bucket, analytical_object, df)
-    logger.info("Poids finaux calcules : moyenne={:.3f}, ecart-type={:.3f}",
-                df["W_FINAL"].mean(), df["W_FINAL"].std())
+    logger.info(
+        "Poids finaux calcules : {} lignes -> {} | moyenne={:.3f}, ecart-type={:.3f}, plage=[{:.3f}, {:.3f}]",
+        df.height, analytical_object,
+        df["W_FINAL"].mean(), df["W_FINAL"].std(), df["W_FINAL"].min(), df["W_FINAL"].max(),
+    )
 
     return analytical_object
 

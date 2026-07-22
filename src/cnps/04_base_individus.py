@@ -60,6 +60,9 @@ def construire_base_individus(cfg: PipelineConfig) -> str:
         df = df.with_columns(
             pl.concat_str(id_parts, separator="_").alias("OBS_ID")
         )
+        logger.info("Identifiant OBS_ID cree a partir de {}", id_parts)
+    else:
+        logger.warning("Aucune colonne d'identifiant trouvee, OBS_ID non cree")
 
     # Initialisation des poids
     df = df.with_columns(
@@ -68,16 +71,26 @@ def construire_base_individus(cfg: PipelineConfig) -> str:
     )
 
     # Sous-variables de periode (si absentes)
+    derived_period_cols = []
     for col in ["TRIMESTRE", "SEMESTRE"]:
         if col not in df.columns and "MOIS" in df.columns:
             diviseur = 3 if col == "TRIMESTRE" else 6
             df = df.with_columns(
                 ((pl.col("MOIS") - 1) // diviseur + 1).cast(pl.Int32).alias(col)
             )
+            derived_period_cols.append(col)
+    if derived_period_cols:
+        logger.info("Colonnes de periode derivees : {}", derived_period_cols)
+
+    n_employeurs = df["ID_EMPLOYEUR"].n_unique() if "ID_EMPLOYEUR" in df.columns else None
+    n_periodes = df["PERIOD"].n_unique() if "PERIOD" in df.columns else None
 
     out_object = f"{cfg.minio.cleaned_prefix}individual_base.parquet"
     write_parquet(cfg.minio, bucket, out_object, df)
-    logger.info("Base individus : {} lignes, {} colonnes -> {}", df.height, df.width, out_object)
+    logger.info(
+        "Base individus : {} lignes, {} colonnes, {} employeurs distincts, {} periodes -> {}",
+        df.height, df.width, n_employeurs, n_periodes, out_object,
+    )
 
     return out_object
 

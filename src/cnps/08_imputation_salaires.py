@@ -119,6 +119,7 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
 
     df = read_parquet(cfg.minio, cleaned_bucket, firm_object)
     M = cfg.modeling.n_imputations
+    logger.info("Nombre d'imputations configure : M={}", M)
     rng = np.random.default_rng(cfg.modeling.random_seed)
 
     df_declaring, df_missing, cat_feats, num_feats = _prepare_imputation_data(df)
@@ -132,6 +133,7 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
 
     # --- Ajustement OLS sur log(salaire) ---
     features = cat_feats + num_feats
+    logger.info("Covariables du modele d'imputation : {}", features)
     y_train = df_declaring["LOG_SALAIRE_MOYEN"].to_numpy()
 
     transformers = []
@@ -187,15 +189,25 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
 
     result = pl.concat(all_frames, how="diagonal")
 
+    imputed_all = np.concatenate([f["SALAIRE_MOYEN"].to_numpy() for f in imputed_frames])
+    logger.info(
+        "Salaires imputes (toutes imputations confondues) : moyenne={:.0f}, mediane={:.0f}, "
+        "plage=[{:.0f}, {:.0f}] (observe : moyenne={:.0f}, mediane={:.0f})",
+        imputed_all.mean(), float(np.median(imputed_all)), imputed_all.min(), imputed_all.max(),
+        df_declaring["SALAIRE_MOYEN"].mean(), df_declaring["SALAIRE_MOYEN"].median(),
+    )
+
     out_object = f"{cfg.minio.cleaned_prefix}firm_base_imputed.parquet"
     write_parquet(cfg.minio, cleaned_bucket, out_object, result)
-    logger.info("Base entreprises imputee : {} lignes (M={}) -> {}", result.height, M, out_object)
+    logger.info("Base entreprises imputee : {} lignes, {} colonnes (M={}) -> {}",
+                result.height, result.width, M, out_object)
 
     model_object = f"{cfg.minio.models_prefix}imputation_model.pkl"
     write_pickle(cfg.minio, cfg.minio.models_bucket, model_object, {
         "model": model, "sigma": sigma_hat, "r_squared": r_squared,
         "features": features,
     })
+    logger.info("Modele d'imputation sauvegarde : {}", model_object)
 
     return out_object
 

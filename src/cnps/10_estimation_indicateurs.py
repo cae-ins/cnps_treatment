@@ -362,6 +362,8 @@ def _estimate_with_imputations(
                     combined[key][stat.name].append(val)
 
     final_rows: list[dict] = []
+    n_rubin = 0
+    n_fallback_mean = 0
     for (dim_label, group), stat_values in combined.items():
         row = {"dimension": dim_label, "group": group}
         for stat in statistics:
@@ -373,14 +375,27 @@ def _estimate_with_imputations(
                 row[stat.name] = rubin.estimate
                 row[f"{stat.name}_ci_lower"] = rubin.ci_lower
                 row[f"{stat.name}_ci_upper"] = rubin.ci_upper
+                n_rubin += 1
             elif vals:
+                # Certaines imputations n'ont pas produit cette statistique
+                # (cellule supprimee pour n_weighted < min_cell dans au moins
+                # une imputation) : repli sur une simple moyenne, sans IC.
                 row[stat.name] = float(np.mean(vals))
+                n_fallback_mean += 1
             else:
                 row[stat.name] = None
         final_rows.append(row)
 
+    if n_fallback_mean > 0:
+        logger.warning(
+            "{} statistiques combinees par moyenne simple (pas de {} imputations completes, "
+            "pas d'intervalle de confiance) sur {} au total",
+            n_fallback_mean, M, n_rubin + n_fallback_mean,
+        )
+
     result = pl.DataFrame(final_rows)
-    logger.info("Estimation par Rubin terminee : {} lignes", result.height)
+    logger.info("Estimation par Rubin terminee : {} lignes, {} colonnes ({} groupes distincts)",
+                result.height, result.width, len(combined))
     return result
 
 
@@ -412,6 +427,8 @@ def estimer_indicateurs(cfg: PipelineConfig) -> pl.DataFrame:
     statistics = cfg.statistics
     enabled_dims = [d for d in cfg.dimensions if d.enabled]
 
+    logger.info("Taille minimale de cellule (secret statistique) : {}", min_cell)
+
     if object_exists(cfg.minio, bucket, imputed_object):
         logger.info("Imputations multiples detectees, utilisation des regles de Rubin")
         return _estimate_with_imputations(
@@ -424,21 +441,26 @@ def estimer_indicateurs(cfg: PipelineConfig) -> pl.DataFrame:
     df = read_parquet(cfg.minio, bucket, analytical_object)
 
     if salary_col not in df.columns:
-        salary_col = "SALAIRE_BRUT" if "SALAIRE_BRUT" in df.columns else None
-        if salary_col is None:
+        fallback = "SALAIRE_BRUT" if "SALAIRE_BRUT" in df.columns else None
+        if fallback is None:
             raise ValueError("Aucune colonne de salaire trouvee dans la base analytique")
+        logger.info("Colonne '{}' absente, repli sur '{}'", salary_col, fallback)
+        salary_col = fallback
 
     logger.info("Estimation de {} statistiques sur {} dimensions ({} lignes)",
                 len(statistics), len(enabled_dims), df.height)
 
     all_rows: list[dict] = []
+    n_suppressed = 0
     for dim in enabled_dims:
         rows = _estimate_dimension(df, dim, salary_col, weight_col, statistics, min_cell)
         all_rows.extend(rows)
+        n_suppressed += sum(1 for r in rows if all(r.get(s.name) is None for s in statistics))
         logger.debug("  {} '{}': {} groupes", dim.name, dim.label, len(rows))
 
     result = pl.DataFrame(all_rows)
-    logger.info("Estimation terminee : {} lignes", result.height)
+    logger.info("Estimation terminee : {} lignes, {} colonnes ({} cellules supprimees pour n < {})",
+                result.height, result.width, n_suppressed, min_cell)
     return result
 
 

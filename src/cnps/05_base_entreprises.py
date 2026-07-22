@@ -67,6 +67,7 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
                   if c in df.columns]
 
     salary_col = "SALAIRE_BRUT_MENS" if "SALAIRE_BRUT_MENS" in df.columns else "SALAIRE_BRUT"
+    logger.info("Colonne de salaire retenue pour l'agregation : {}", salary_col)
 
     agg_exprs = [pl.len().alias("EFFECTIF_OBSERVE")]
 
@@ -99,6 +100,7 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
 
     for attr in firm_attrs:
         agg_exprs.append(pl.col(attr).first().alias(attr))
+    logger.info("Attributs entreprise reportes : {}", firm_attrs)
 
     firm_df = df.group_by(group_cols).agg(agg_exprs)
     logger.info("Agrege en {} enregistrements entreprise-periode", firm_df.height)
@@ -109,6 +111,8 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
         all_periods = firm_df.select(
             [c for c in ["PERIOD", "MOIS", "ANNEE"] if c in firm_df.columns]
         ).unique()
+        logger.info("Panel cartesien : {} entreprises x {} periodes",
+                     all_firms.height, all_periods.height)
 
         balanced = all_firms.join(all_periods, how="cross")
 
@@ -169,10 +173,13 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
                 .over("ID_EMPLOYEUR")
                 .alias("TAUX_DECLARATION_PASSE")
             )
+        logger.info("Variables retardees ajoutees : LAG_D_JT, LAG_SALAIRE_MOYEN, "
+                    "LAG_EFFECTIF_OBSERVE, TAUX_DECLARATION_PASSE")
 
     out_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
     write_parquet(cfg.minio, bucket, out_object, firm_df)
-    logger.info("Base entreprises : {} lignes -> {}", firm_df.height, out_object)
+    logger.info("Base entreprises : {} lignes, {} colonnes -> {}",
+                firm_df.height, firm_df.width, out_object)
 
     return out_object
 

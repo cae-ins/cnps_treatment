@@ -17,7 +17,10 @@
       "Bash(mc ls *)",
       "Bash(mc cp *)",
       "Bash(mc rm *)",
-      "Bash(jupyter nbconvert *)"
+      "Bash(jupyter nbconvert *)",
+      "Bash(python -m py_compile src/cnps/04_base_individus.py src/cnps/05_base_entreprises.py src/cnps/06_base_analytique.py src/cnps/07_modele_declaration.py src/cnps/08_imputation_salaires.py src/cnps/09_ponderation_finale.py src/cnps/10_estimation_indicateurs.py src/cnps/11_validation_qualite.py src/cnps/12_export_excel.py)",
+      "Bash(python -m py_compile src/cnps/01_lecture_fichiers.py src/cnps/02_harmonisation_types.py)",
+      "Bash(.venv/bin/python -c \"import importlib; importlib.import_module\\('cnps.01_lecture_fichiers'\\); importlib.import_module\\('cnps.02_harmonisation_types'\\)\")"
     ],
     "additionalDirectories": [
       "/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2"

@@ -63,7 +63,13 @@ Don
 
     join_on = [c for c in firm_join_cols if c in indiv.columns and c in firm_subset.columns]
     if join_on:
+        logger.info("Jointure sur {} : {} colonnes entreprise ajoutees", join_on, len(firm_value_cols))
         analytical = indiv.join(firm_subset, on=join_on, how="left")
+        if analytical.height != indiv.height:
+            logger.warning(
+                "La jointure a change le nombre de lignes : {} -> {} (cle non-unique cote entreprise ?)",
+                indiv.height, analytical.height,
+            )
     else:
         logger.warning("Aucune cle de jointure commune trouvee. Base individus retournee telle quelle.")
         analytical = indiv
@@ -72,14 +78,21 @@ Don
     analytical = analytical.with_columns(
         (pl.col("W_JT") * pl.col("W_INDIV")).alias("W_FINAL")
     )
+    n_null_weight = analytical["W_FINAL"].null_count()
+    if n_null_weight > 0:
+        logger.warning("W_FINAL est null pour {} lignes (W_JT ou W_INDIV manquant)", n_null_weight)
 
     # Verifie la presence des dimensions d'analyse configurees
     enabled_dims = [d for d in cfg.dimensions if d.enabled and d.group_by]
+    missing_dims = 0
     for dim in enabled_dims:
         for col in dim.group_by:
             if col not in analytical.columns:
                 logger.warning("Colonne de dimension '{}' ({}) absente de la base analytique",
                                col, dim.label)
+                missing_dims += 1
+    logger.info("Dimensions d'analyse : {}/{} colonnes presentes",
+                len(enabled_dims) - missing_dims, len(enabled_dims))
 
     out_object = f"{cfg.minio.cleaned_prefix}analytical_base.parquet"
     write_parquet(cfg.minio, bucket, out_object, analytical)

@@ -240,8 +240,18 @@ def lire_fichiers(cfg: PipelineConfig) -> list[dict]:
         if r["status"] == "ok":
             registry.update(r["file"], r.get("hash", ""))
 
-    ok = sum(1 for r in results if r["status"] == "ok")
-    logger.info("Ingestion terminee : {}/{} fichiers traites avec succes", ok, len(to_process))
+    ok = [r for r in results if r["status"] == "ok"]
+    empty = [r for r in results if r["status"] == "empty"]
+    total_rows = sum(r.get("rows", 0) for r in ok)
+
+    for r in ok:
+        logger.info("  {} -> {} lignes, {} colonnes -> {}",
+                     r["file"], r["rows"], r["columns"], r["output"])
+    for r in empty:
+        logger.warning("  {} : aucune donnee trouvee, ignore", r["file"])
+
+    logger.info("Ingestion terminee : {}/{} fichiers traites avec succes, {} lignes au total",
+                len(ok), len(to_process), total_rows)
 
     return results
 

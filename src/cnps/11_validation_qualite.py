@@ -259,6 +259,10 @@ def valider_tout(
         combined.issues.extend(report.issues)
 
     logger.info("Validation complete : {}", combined.summary())
+    for issue in combined.issues:
+        level = issue.level if issue.level in ("INFO", "WARNING", "ERROR") else "INFO"
+        logger.log(level, "  [{}/{}] {}: {}", issue.level, issue.stage, issue.check, issue.message)
+
     return combined
 
 
@@ -293,10 +297,8 @@ if __name__ == "__main__":
         # results=None : validation donnees + modeles uniquement. Chainer
         # l'estimation de l'etape 10 ici defeaterait l'interet d'isoler
         # l'etape 11 (voir cas particulier etape 12 pour ce chainage).
-        report = valider_tout(cfg)
-        logger.info("Validation: {}", report.summary())
-        for issue in report.issues:
-            logger.info("[{}] {}: {}", issue.stage, issue.check, issue.message)
+        # valider_tout logue deja chaque issue en detail, rien a ajouter ici.
+        valider_tout(cfg)
         logger.info("Termine avec succes.")
     except Exception as exc:
         logger.exception("Echec de l'etape: {}", exc)

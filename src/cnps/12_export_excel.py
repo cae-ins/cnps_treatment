@@ -64,6 +64,10 @@ def exporter_indicateurs(
         results = results.with_columns(pl.lit("Resultats").alias("dimension"))
 
     dimensions = results["dimension"].unique().sort().to_list()
+    logger.info("Export de {} lignes sur {} feuilles ({})",
+                results.height, len(dimensions), ", ".join(dimensions))
+
+    sheet_rows: dict[str, int] = {}
 
     def _write(buf: io.BytesIO) -> None:
         import xlsxwriter
@@ -94,6 +98,7 @@ def exporter_indicateurs(
 
             dim_df = results.filter(pl.col("dimension") == dim_label)
             cols = [c for c in dim_df.columns if c != "dimension"]
+            sheet_rows[dim_label] = dim_df.height
 
             for col_idx, col_name in enumerate(cols):
                 label = stat_labels.get(col_name, col_name.replace("_", " ").title())
@@ -129,6 +134,8 @@ def exporter_indicateurs(
         wb.close()
 
     write_workbook(cfg.minio, cfg.minio.output_bucket, out_object, _write)
+    for dim_label, n_rows in sheet_rows.items():
+        logger.info("  Feuille '{}' : {} lignes", dim_label, n_rows)
     logger.info("Indicateurs exportes vers {}", out_object)
     return out_object
 
@@ -150,6 +157,10 @@ def exporter_rapport_validation(
         }
         for issue in report.issues
     ]
+    n_errors = sum(1 for issue in report.issues if issue.level == "ERROR")
+    n_warnings = sum(1 for issue in report.issues if issue.level == "WARNING")
+    logger.info("Export du rapport de validation : {} problemes ({} erreurs, {} avertissements)",
+                len(rows), n_errors, n_warnings)
 
     def _write(buf: io.BytesIO) -> None:
         if rows:

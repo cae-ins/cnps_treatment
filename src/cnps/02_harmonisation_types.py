@@ -189,9 +189,9 @@ def harmoniser_types(cfg: PipelineConfig) -> list[str]:
         return []
 
     result_objects: list[str] = []
+    total_rows = 0
 
     for object_name in files:
-        logger.info("Harmonisation des types : {}", object_name)
         df = read_parquet(cfg.minio, bucket, object_name)
 
         df = _normalize_column_names(df)
@@ -201,10 +201,12 @@ def harmoniser_types(cfg: PipelineConfig) -> list[str]:
 
         write_parquet(cfg.minio, bucket, object_name, df)
         result_objects.append(object_name)
+        total_rows += df.height
 
-        logger.debug("  {} -> {} lignes, {} colonnes", object_name, df.height, df.width)
+        logger.info("  {} -> {} lignes, {} colonnes", object_name, df.height, df.width)
 
-    logger.info("Harmonisation des types terminee pour {} fichiers", len(result_objects))
+    logger.info("Harmonisation des types terminee pour {} fichiers, {} lignes au total",
+                len(result_objects), total_rows)
     return result_objects
 
 

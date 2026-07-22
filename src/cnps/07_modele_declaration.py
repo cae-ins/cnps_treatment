@@ -78,6 +78,8 @@ def _prepare_features(
         raise ValueError("Aucune covariable valide trouvee pour le modele de declaration")
 
     df_model = df.drop_nulls(subset=["D_JT"])
+    if df_model.height != df.height:
+        logger.info("Lignes sans D_JT exclues de l'ajustement : {} -> {}", df.height, df_model.height)
 
     # Nulls numeriques -> 0 (la premiere periode n'a pas de valeur retardee)
     for col in num_feats:
@@ -168,12 +170,15 @@ def ajuster_modele_declaration(cfg: PipelineConfig) -> str:
     # --- Poids IPW ---
     # Poids stabilises : w_jt = P(D=1) / p_hat_jt
     marginal_p = y.mean()
+    logger.info("Taux de declaration marginal (base de stabilisation) : {:.3f}", marginal_p)
     epsilon = 1e-6
     p_hat_clipped = np.clip(p_hat, epsilon, 1 - epsilon)
     w_jt = marginal_p / p_hat_clipped
 
     lo = np.quantile(w_jt, cfg.modeling.ipw_trim_lower)
     hi = np.quantile(w_jt, cfg.modeling.ipw_trim_upper)
+    logger.info("Troncature des poids IPW aux percentiles [{:.0%}, {:.0%}] : bornes [{:.3f}, {:.3f}]",
+                cfg.modeling.ipw_trim_lower, cfg.modeling.ipw_trim_upper, lo, hi)
     w_jt = np.clip(w_jt, lo, hi)
 
     logger.info("Poids IPW : moyenne={:.3f}, mediane={:.3f}, plage=[{:.3f}, {:.3f}]",
@@ -191,13 +196,18 @@ def ajuster_modele_declaration(cfg: PipelineConfig) -> str:
         weights_df = df_model.select(join_cols + ["W_JT", "P_HAT_JT"])
         df_orig = read_parquet(cfg.minio, cleaned_bucket, firm_object).drop(["W_JT"], strict=False)
         df_updated = df_orig.join(weights_df, on=join_cols, how="left")
+        n_fallback = df_updated["W_JT"].null_count()
         df_updated = df_updated.with_columns(
             pl.col("W_JT").fill_null(1.0),
         )
+        if n_fallback > 0:
+            logger.info("Poids par defaut (1.0) applique a {} lignes non modelisees", n_fallback)
     else:
         df_updated = df_model
 
     write_parquet(cfg.minio, cleaned_bucket, firm_object, df_updated)
+    logger.info("Base entreprises mise a jour (poids IPW) : {} lignes, {} colonnes -> {}",
+                df_updated.height, df_updated.width, firm_object)
 
     # --- Sauvegarde du modele ---
     model_object = f"{cfg.minio.models_prefix}declaration_model.pkl"
