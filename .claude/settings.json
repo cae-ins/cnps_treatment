@@ -26,7 +26,9 @@
       "Bash(.venv/bin/python src/cnps/audit_qualite.py --help)",
       "Bash(python -m py_compile src/cnps/audit.py)",
       "Bash(.venv/bin/python -c \"import importlib; m = importlib.import_module\\('cnps.audit'\\); print\\(m.executer_audit_etape\\)\")",
-      "Bash(.venv/bin/python src/cnps/audit.py --help)"
+      "Bash(.venv/bin/python src/cnps/audit.py --help)",
+      "Bash(/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2/.venv/bin/python -c ' *)",
+      "Bash(python -m py_compile src/cnps/audit.py src/cnps/cli.py)"
     ],
     "additionalDirectories": [
       "/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2"

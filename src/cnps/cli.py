@@ -213,7 +213,7 @@ def audit(
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
 
-    audit_module = importlib.import_module("cnps.audit_qualite")
+    audit_module = importlib.import_module("cnps.audit")
     out = audit_module.executer_audit(
         cfg,
         input_bucket=input_bucket,
