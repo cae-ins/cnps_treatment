@@ -28,7 +28,7 @@ from datetime import datetime
 import polars as pl
 from loguru import logger
 
-from cnps.config import PipelineConfig
+from cnps.config import PipelineConfig, load_config
 from cnps.storage import list_objects, read_parquet, write_workbook
 
 _FILENAME_RE = re.compile(r"^(\d{2})_(\d{4})\.parquet$")
@@ -571,3 +571,61 @@ def executer_audit(
 
     logger.info("Fichier d'audit genere : {}", output_object)
     return output_object
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(
+        description=__doc__.strip().splitlines()[0] if __doc__ else None
+    )
+    parser.add_argument("--settings", "-s", type=Path, default=None)
+    parser.add_argument("--dimensions", "-d", type=Path, default=None)
+    parser.add_argument(
+        "--input-bucket", default=None,
+        help="Bucket MinIO des parquets a auditer (defaut: processed_bucket, silver/)",
+    )
+    parser.add_argument(
+        "--input", dest="input_prefix", default=None,
+        help="Prefixe MinIO des parquets a auditer (defaut: processed_prefix)",
+    )
+    parser.add_argument("--output-bucket", default=None)
+    parser.add_argument("--output", dest="output_prefix", default=None)
+    parser.add_argument("--salary-var", default="SALAIRE_BRUT")
+    parser.add_argument("--id-var", default="ID_INDIV")
+    parser.add_argument("--verbose", "-v", action="store_true")
+    args = parser.parse_args()
+
+    cfg = load_config(args.settings, args.dimensions)
+
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level="DEBUG" if args.verbose else "INFO",
+        colorize=True,
+        format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
+    )
+    logger.add(
+        str(cfg.paths.logs / f"{Path(__file__).stem}.log"),
+        level="DEBUG", rotation="10 MB", retention="30 days", encoding="utf-8",
+    )
+
+    try:
+        # Par defaut, audite silver/cnps/ (etat brut converti par l'etape 01,
+        # AVANT l'harmonisation de l'etape 02) : le point le plus proche des
+        # fichiers CNPS originaux tout en restant exploitable en Parquet.
+        executer_audit(
+            cfg,
+            input_bucket=args.input_bucket,
+            input_prefix=args.input_prefix,
+            output_bucket=args.output_bucket,
+            output_prefix=args.output_prefix,
+            salary_var=args.salary_var,
+            id_var=args.id_var,
+        )
+        logger.info("Termine avec succes.")
+    except Exception as exc:
+        logger.exception("Echec de l'audit: {}", exc)
+        sys.exit(1)

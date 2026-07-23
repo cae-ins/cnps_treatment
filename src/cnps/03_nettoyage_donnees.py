@@ -11,7 +11,7 @@ Variables derivees
 ------------------
 - ``AGE_EMPLOYE`` : age en annees depuis ``DATE_NAISSANCE``
 - ``ANCIENNETE_ENTREPRISE`` : anciennete en annees depuis ``DATE_EMBAUCHE``
-- ``ANCIENNETE_IMMAT`` : anciennete d'immatriculation
+- ``ANCIENNETE_IMMAT`` : anciennete d'immatriculation de l'employé 
 - ``AGE_ENTREPRISE_IMMAT`` : age de l'entreprise depuis ``DATE_IMMAT_EMPLOYEUR``
 - ``SALAIRE_BRUT_MENS`` : salaire mensuel = SALAIRE_BRUT / max(DUREE_TRAVAILLEE, 1) * 12
 - Variables de classe (age, anciennete, taille d'entreprise)
