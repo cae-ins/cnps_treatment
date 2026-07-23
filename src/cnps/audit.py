@@ -23,6 +23,9 @@ Controles
                           d'un mois a l'autre (ligne = origine, colonne = destination)
 9. Distribution        — Min/max/moyenne/mediane/ecart-type/quantiles de
                           chaque variable numerique, par fichier
+10. Manquants_vs_Salaire — Taux de valeurs manquantes de chaque variable,
+                          compare entre les lignes ou SALAIRE_BRUT est
+                          renseigne et celles ou il est manquant
 
 Sortie : un classeur Excel avec une feuille par controle.
 
@@ -168,6 +171,60 @@ def _check_valeurs_manquantes(data: list[tuple[str, int, int, pl.DataFrame]]) ->
                 "total_obs": n_tot,
                 "pct_na": round(nb_na / n_tot * 100, 2) if n_tot > 0 else 0.0,
             })
+    return pl.DataFrame(rows)
+
+
+def _check_manquants_vs_salaire(
+    data: list[tuple[str, int, int, pl.DataFrame]],
+    salary_var: str = "SALAIRE_BRUT",
+) -> pl.DataFrame:
+    """
+    10. Compare, pour chaque variable, le taux de valeurs manquantes selon
+    que salary_var est lui-meme renseigne ou manquant sur la meme ligne.
+
+    Revele si l'absence de salaire est correlee a des lignes mal remplies
+    en general (autres champs egalement manquants), ou si c'est un manque
+    isole propre a salary_var.
+    """
+    rows = []
+    for fname, mois, annee, df in data:
+        if salary_var not in df.columns:
+            continue
+
+        avec_salaire = df.filter(pl.col(salary_var).is_not_null())
+        sans_salaire = df.filter(pl.col(salary_var).is_null())
+        n_avec = avec_salaire.height
+        n_sans = sans_salaire.height
+
+        for col in df.columns:
+            if col == salary_var:
+                continue
+            pct_na_avec = round(avec_salaire[col].null_count() / n_avec * 100, 2) if n_avec > 0 else None
+            pct_na_sans = round(sans_salaire[col].null_count() / n_sans * 100, 2) if n_sans > 0 else None
+            ecart = (
+                round(pct_na_sans - pct_na_avec, 2)
+                if pct_na_avec is not None and pct_na_sans is not None
+                else None
+            )
+            rows.append({
+                "fichier": fname,
+                "ANNEE": annee,
+                "MOIS": mois,
+                "variable": col,
+                f"n_{salary_var}_renseigne": n_avec,
+                f"n_{salary_var}_manquant": n_sans,
+                "pct_na_si_salaire_renseigne": pct_na_avec,
+                "pct_na_si_salaire_manquant": pct_na_sans,
+                "ecart_pts": ecart,
+            })
+
+    if not rows:
+        return pl.DataFrame(schema={
+            "fichier": pl.Utf8, "ANNEE": pl.Int64, "MOIS": pl.Int64, "variable": pl.Utf8,
+            f"n_{salary_var}_renseigne": pl.Int64, f"n_{salary_var}_manquant": pl.Int64,
+            "pct_na_si_salaire_renseigne": pl.Float64, "pct_na_si_salaire_manquant": pl.Float64,
+            "ecart_pts": pl.Float64,
+        })
     return pl.DataFrame(rows)
 
 
@@ -320,15 +377,53 @@ _NUMERIC_DTYPES = (
     pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64,
 )
 
+# Part minimale de valeurs non-nulles qui doivent se convertir en nombre
+# pour qu'une colonne Utf8/String soit consideree comme numerique (au lieu
+# d'un identifiant alphanumerique ou d'un texte libre).
+_NUMERIC_COERCION_THRESHOLD = 0.95
+
+
+def _numeric_series(df: pl.DataFrame, col: str) -> pl.Series | None:
+    """
+    Retourne la colonne castee en Float64 si elle est deja numerique, ou si
+    elle est Utf8/String avec au moins _NUMERIC_COERCION_THRESHOLD de ses
+    valeurs non-nulles convertibles en nombre (cas de silver/cnps/, ou tout
+    est lu en texte brut a l'etape 01, avant la coercition de l'etape 02).
+    Retourne None si la colonne n'est pas exploitable comme numerique.
+    """
+    dt = df.schema[col]
+    if dt in _NUMERIC_DTYPES:
+        return df[col]
+
+    if dt not in (pl.Utf8, pl.String):
+        return None
+
+    raw = df[col].drop_nulls()
+    if raw.len() == 0:
+        return None
+
+    # Cast strict sur la valeur telle quelle (espaces de bordure retires) :
+    # pas de nettoyage prealable des caracteres non numeriques, pour ne pas
+    # confondre un identifiant alphanumerique (ex. "A001" -> "001" -> 1.0)
+    # avec une vraie valeur numerique.
+    coerced = raw.str.strip_chars().cast(pl.Float64, strict=False)
+    n_convertible = coerced.drop_nulls().len()
+    if n_convertible / raw.len() < _NUMERIC_COERCION_THRESHOLD:
+        return None
+
+    return coerced
+
 
 def _check_distribution(data: list[tuple[str, int, int, pl.DataFrame]]) -> pl.DataFrame:
     """9. Distribution (min/max/moyenne/mediane/ecart-type/quantiles) de
-    chaque variable numerique, par fichier."""
+    chaque variable numerique (ou numerique-comme-texte), par fichier."""
     rows = []
     for fname, mois, annee, df in data:
-        numeric_cols = [c for c, dt in zip(df.columns, df.dtypes) if dt in _NUMERIC_DTYPES]
-        for col in numeric_cols:
-            x = df[col].drop_nulls()
+        for col in df.columns:
+            x = _numeric_series(df, col)
+            if x is None:
+                continue
+            x = x.drop_nulls()
             if x.len() == 0:
                 continue
             rows.append({
@@ -489,6 +584,7 @@ def _export_audit_excel(
     top_doublons_id: pl.DataFrame,
     transitions: pl.DataFrame,
     distribution: pl.DataFrame,
+    manquants_vs_salaire: pl.DataFrame,
 ) -> None:
     """Ecrit tous les DataFrames d'audit dans un classeur Excel sur MinIO."""
     def _write(buf: io.BytesIO) -> None:
@@ -522,6 +618,7 @@ def _export_audit_excel(
             ("Unicite_ID", unicite_id),
             ("Top_doublons_ID", top_doublons_id),
             ("Distribution", distribution),
+            ("Manquants_vs_Salaire", manquants_vs_salaire),
         ]
 
         for sheet_name, df in sheets:
@@ -606,32 +703,35 @@ def executer_audit(
 
     logger.info("Fichiers a auditer : {}", len(data))
 
-    logger.info("1/9 - Verification des doublons...")
+    logger.info("1/10 - Verification des doublons...")
     df_doublons = _check_doublons(data)
 
-    logger.info("2/9 - Verification des colonnes...")
+    logger.info("2/10 - Verification des colonnes...")
     df_colonnes = _check_colonnes(data)
 
-    logger.info("3/9 - Verification des types...")
+    logger.info("3/10 - Verification des types...")
     df_types = _check_types(data)
 
-    logger.info("4/9 - Verification des valeurs manquantes...")
+    logger.info("4/10 - Verification des valeurs manquantes...")
     df_missing = _check_valeurs_manquantes(data)
 
-    logger.info("5/9 - Detection des outliers ({})...", salary_var)
+    logger.info("5/10 - Detection des outliers ({})...", salary_var)
     df_outliers = _check_outliers(data, variable=salary_var, iqr_multiplier=iqr_multiplier)
 
-    logger.info("6/9 - Verification de l'unicite des ID ({})...", id_var)
+    logger.info("6/10 - Verification de l'unicite des ID ({})...", id_var)
     df_unicite = _check_unicite_id(data, id_var=id_var)
 
-    logger.info("7/9 - Top 5% des ID les plus dupliques ({})...", id_var)
+    logger.info("7/10 - Top 5% des ID les plus dupliques ({})...", id_var)
     df_top_dup = _check_top_doublons_id(data, id_var=id_var)
 
-    logger.info("8/9 - Matrice de transitions des ID ({})...", id_var)
+    logger.info("8/10 - Matrice de transitions des ID ({})...", id_var)
     df_transitions = _check_transitions(data, id_var=id_var)
 
-    logger.info("9/9 - Distribution des variables numeriques...")
+    logger.info("9/10 - Distribution des variables numeriques...")
     df_distribution = _check_distribution(data)
+
+    logger.info("10/10 - Valeurs manquantes selon presence de {}...", salary_var)
+    df_manquants_vs_salaire = _check_manquants_vs_salaire(data, salary_var=salary_var)
 
     logger.info("Export Excel...")
     _export_audit_excel(
@@ -639,7 +739,7 @@ def executer_audit(
         doublons=df_doublons, colonnes=df_colonnes, types=df_types,
         valeurs_manquantes=df_missing, outliers=df_outliers,
         unicite_id=df_unicite, top_doublons_id=df_top_dup, transitions=df_transitions,
-        distribution=df_distribution,
+        distribution=df_distribution, manquants_vs_salaire=df_manquants_vs_salaire,
     )
 
     logger.info("Fichier d'audit genere : {}", output_object)

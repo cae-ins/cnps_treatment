@@ -28,7 +28,9 @@
       "Bash(.venv/bin/python -c \"import importlib; m = importlib.import_module\\('cnps.audit'\\); print\\(m.executer_audit_etape\\)\")",
       "Bash(.venv/bin/python src/cnps/audit.py --help)",
       "Bash(/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2/.venv/bin/python -c ' *)",
-      "Bash(python -m py_compile src/cnps/audit.py src/cnps/cli.py)"
+      "Bash(python -m py_compile src/cnps/audit.py src/cnps/cli.py)",
+      "Bash(grep -v \"Missing required CPU\\\\|Continuing to use\\\\|Install\\\\|Hint:\\\\|recommended\\\\|warnings.warn\\\\|^$\")",
+      "Bash(.venv/bin/python -c \"import importlib; importlib.import_module\\('cnps.audit'\\)\")"
     ],
     "additionalDirectories": [
       "/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2"
