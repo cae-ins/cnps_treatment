@@ -28,10 +28,8 @@ Controles
                           renseigne et celles ou il est manquant
 
 Sortie : un classeur Excel avec une feuille par controle, precede d'une
-feuille "Rapport_Synthese" qui traduit les resultats des 10 controles
-ci-dessus en une liste de constats en langage clair (Critique / Attention /
-Information), des lors qu'ils depassent les seuils definis dans
-``_build_rapport_synthese``.
+feuille "Guide_Lecture" qui explique, pour chaque feuille du classeur,
+son objectif et comment l'interpreter.
 
 Comme jointure_anstat.py, ce script est explicitement hors du DAG numerote
 01-12 (voir orchestrator.py::discover_stages) : il ne sera jamais execute
@@ -62,14 +60,6 @@ _HEADER_FONT = "#FFFFFF"
 _ALT_ROW_COLOR = "#F2F3F4"
 
 _ETAPES_DISPONIBLES = ("01",)
-
-# Seuils au-dela desquels un constat est remonte dans le rapport de synthese.
-_SEUIL_PCT_DOUBLONS = 0.0
-_SEUIL_PCT_NA = 5.0
-_SEUIL_PCT_OUTLIERS = 1.0
-_SEUIL_ECART_NA_VS_SALAIRE = 10.0
-
-_NIVEAU_ORDRE = {"Critique": 0, "Attention": 1, "Information": 2}
 
 
 # ---------------------------------------------------------------------------
@@ -470,132 +460,141 @@ def _check_distribution(data: list[tuple[str, int, int, pl.DataFrame]]) -> pl.Da
 
 
 # ---------------------------------------------------------------------------
-# Rapport de synthese des incoherences
+# Guide de lecture (feuille explicative statique)
 # ---------------------------------------------------------------------------
 
-def _build_rapport_synthese(
-    *,
-    doublons: pl.DataFrame,
-    colonnes: pl.DataFrame,
-    types: pl.DataFrame,
-    valeurs_manquantes: pl.DataFrame,
-    outliers: pl.DataFrame,
-    unicite_id: pl.DataFrame,
-    top_doublons_id: pl.DataFrame,
-    manquants_vs_salaire: pl.DataFrame,
-    salary_var: str = "SALAIRE_BRUT",
-) -> pl.DataFrame:
-    """
-    Analyse les DataFrames d'audit deja calcules et en deduit une liste de
-    constats en langage clair (une ligne par incoherence relevee), triee par
-    niveau de gravite puis par fichier/periode.
+# (Feuille, Objectif, Comment l'interpreter) — un triplet par controle,
+# dans l'ordre ou les feuilles apparaissent dans le classeur.
+_GUIDE_LECTURE: list[tuple[str, str, str]] = [
+    (
+        "Doublons_lignes",
+        "Detecter les lignes strictement identiques (toutes colonnes confondues) "
+        "au sein d'un meme fichier mensuel.",
+        "Un pourcentage eleve indique un probleme d'extraction ou de doublon "
+        "d'import cote source ; ces lignes gonflent artificiellement les effectifs "
+        "si elles ne sont pas dedupliquees en amont.",
+    ),
+    (
+        "Colonnes",
+        "Verifier que chaque fichier mensuel possede le meme jeu de colonnes que "
+        "le premier fichier de la serie (pris comme reference).",
+        "Une colonne manquante peut faire disparaitre silencieusement une "
+        "information dans les etapes suivantes du pipeline ; une colonne en plus "
+        "peut signaler un changement de format source a documenter.",
+    ),
+    (
+        "Types_variables",
+        "Comparer, pour chaque variable commune, le type de donnees (texte, "
+        "entier, decimal...) du fichier au type du fichier de reference.",
+        "Un type qui change d'un mois a l'autre (ex. colonne lue comme texte "
+        "un mois et comme nombre un autre) provoque des echecs ou des "
+        "conversions silencieuses lors de l'harmonisation en etape 02.",
+    ),
+    (
+        "Valeurs_manquantes",
+        "Mesurer, pour chaque variable et chaque fichier, la part de valeurs "
+        "non renseignees.",
+        "Un taux de valeurs manquantes anormalement eleve ou qui augmente dans "
+        "le temps peut reveler un champ mal collecte ou une variable devenue "
+        "obsolete cote source.",
+    ),
+    (
+        "Outliers_Salaire",
+        "Reperer les valeurs extremes de SALAIRE_BRUT via la methode des "
+        "quartiles (IQR) : tout ce qui sort de [Q1 - 1.5*IQR, Q3 + 1.5*IQR].",
+        "Une part importante de valeurs hors bornes peut signaler des erreurs "
+        "de saisie (salaires en centimes au lieu de francs, doubles zeros, "
+        "etc.) ou une population reellement heterogene a examiner au cas par cas.",
+    ),
+    (
+        "Unicite_ID",
+        "Verifier que l'identifiant individuel (ID_INDIV) n'apparait qu'une "
+        "seule fois par fichier mensuel.",
+        "Des doublons d'identifiant faussent tout calcul agrege par individu "
+        "(masse salariale, effectifs) : c'est un signal a traiter en priorite "
+        "avant toute analyse en aval.",
+    ),
+    (
+        "Top_doublons_ID",
+        "Lister, pour chaque mois, les 5% d'identifiants les plus souvent "
+        "dupliques.",
+        "Utile pour cibler l'investigation : plutot que de traiter tous les "
+        "doublons d'un coup, cette feuille pointe les cas les plus extremes, "
+        "souvent revelateurs d'un probleme structurel (ex. fusion d'etablissements).",
+    ),
+    (
+        "Distribution",
+        "Donner les statistiques descriptives (min, max, moyenne, mediane, "
+        "ecart-type, quantiles) de chaque variable numerique, par fichier.",
+        "Permet de suivre l'evolution des ordres de grandeur dans le temps et "
+        "de reperer une rupture (changement d'unite, de barème, de population) "
+        "entre deux mois consecutifs.",
+    ),
+    (
+        "Manquants_vs_Salaire",
+        "Comparer le taux de valeurs manquantes de chaque variable selon que "
+        "SALAIRE_BRUT est lui-meme renseigne ou non sur la meme ligne.",
+        "Un ecart important indique que l'absence de salaire n'est pas isolee : "
+        "les lignes sans salaire sont aussi mal remplies sur le reste, ce qui "
+        "oriente vers un probleme de saisie globale plutot qu'un champ "
+        "specifique.",
+    ),
+    (
+        "Transitions_ID",
+        "Mesurer, pour chaque paire de mois, la proportion d'identifiants du "
+        "mois d'origine retrouves dans le mois de destination.",
+        "Une retention faible d'un mois sur l'autre peut traduire un turnover "
+        "reel, mais aussi un probleme de generation d'identifiant si la chute "
+        "est brutale et generalisee sur toute une periode.",
+    ),
+]
 
-    N'effectue aucun nouveau calcul sur les donnees source : relit uniquement
-    les resultats des 10 controles pour les traduire en phrases, avec des
-    seuils explicites (cf. constantes ``_SEUIL_*``) au-dela desquels un constat
-    est considere comme une incoherence a signaler.
-    """
-    constats: list[dict] = []
 
-    def _ajouter(niveau: str, controle: str, fichier: str, message: str) -> None:
-        constats.append({
-            "Niveau": niveau,
-            "Controle": controle,
-            "Fichier": fichier,
-            "Constat": message,
-        })
+def _write_guide_lecture_sheet(wb, header_fmt, text_fmt) -> None:
+    """Ecrit une feuille explicative statique decrivant chaque feuille du classeur."""
+    ws = wb.add_worksheet("Guide_Lecture")
+    ws.set_tab_color("#2C3E50")
 
-    # 1. Doublons de lignes
-    for row in doublons.iter_rows(named=True):
-        if row["nb_lignes_dupliquees"] > 0 and row["pct_lignes_dupliquees"] > _SEUIL_PCT_DOUBLONS:
-            _ajouter(
-                "Attention", "Doublons_lignes", row["fichier"],
-                f"{row['nb_lignes_dupliquees']} lignes dupliquees "
-                f"({row['pct_lignes_dupliquees']}% de {row['total_obs']} lignes).",
-            )
+    title_fmt = wb.add_format({"bold": True, "font_size": 14})
+    subtitle_fmt = wb.add_format({"italic": True, "font_color": "#7F8C8D"})
+    ws.write(0, 0, "Guide de lecture du classeur d'audit qualite", title_fmt)
+    ws.write(
+        1, 0,
+        "Cette feuille explique l'objectif de chaque feuille du classeur et "
+        "comment en interpreter le contenu.",
+        subtitle_fmt,
+    )
 
-    # 2. Coherence des colonnes
-    for row in colonnes.iter_rows(named=True):
-        if row["colonnes_manquantes"]:
-            _ajouter(
-                "Critique", "Colonnes", row["fichier"],
-                f"Colonnes manquantes par rapport au fichier de reference : {row['colonnes_manquantes']}.",
-            )
-        if row["colonnes_en_plus"]:
-            _ajouter(
-                "Information", "Colonnes", row["fichier"],
-                f"Colonnes supplementaires par rapport au fichier de reference : {row['colonnes_en_plus']}.",
-            )
+    header_row = 3
+    cols = ["Feuille", "Objectif", "Comment l'interpreter"]
+    for ci, col_name in enumerate(cols):
+        ws.write(header_row, ci, col_name, header_fmt)
 
-    # 3. Types de variables
-    for row in types.iter_rows(named=True):
-        _ajouter(
-            "Attention", "Types_variables", row["fichier"],
-            f"Variable '{row['variable']}' de type {row['type_fichier']} "
-            f"au lieu de {row['type_reference']} (reference).",
-        )
+    sheet_name_fmt = wb.add_format({
+        "bold": True, "border": 1, "text_wrap": True, "valign": "top",
+    })
+    body_fmt = wb.add_format({"border": 1, "text_wrap": True, "valign": "top"})
+    alt_sheet_name_fmt = wb.add_format({
+        "bold": True, "border": 1, "text_wrap": True, "valign": "top",
+        "bg_color": _ALT_ROW_COLOR,
+    })
+    alt_body_fmt = wb.add_format({
+        "border": 1, "text_wrap": True, "valign": "top", "bg_color": _ALT_ROW_COLOR,
+    })
 
-    # 4. Valeurs manquantes
-    for row in valeurs_manquantes.iter_rows(named=True):
-        if row["pct_na"] > _SEUIL_PCT_NA:
-            _ajouter(
-                "Attention", "Valeurs_manquantes", row["fichier"],
-                f"Variable '{row['variable']}' : {row['pct_na']}% de valeurs manquantes "
-                f"({row['nb_na']}/{row['total_obs']}).",
-            )
+    for ri, (feuille, objectif, interpretation) in enumerate(_GUIDE_LECTURE):
+        is_alt = ri % 2 == 1
+        fmt_name = alt_sheet_name_fmt if is_alt else sheet_name_fmt
+        fmt_body = alt_body_fmt if is_alt else body_fmt
+        row = header_row + 1 + ri
+        ws.write(row, 0, feuille, fmt_name)
+        ws.write(row, 1, objectif, fmt_body)
+        ws.write(row, 2, interpretation, fmt_body)
 
-    # 5. Outliers de salaire
-    for row in outliers.iter_rows(named=True):
-        if row["pct_outliers"] > _SEUIL_PCT_OUTLIERS:
-            _ajouter(
-                "Attention", "Outliers_Salaire", row["fichier"],
-                f"{row['nb_outliers']} valeurs extremes sur '{row['variable']}' "
-                f"({row['pct_outliers']}%), hors bornes [{row['borne_basse']}, {row['borne_haute']}].",
-            )
-
-    # 6. Unicite de l'identifiant
-    for row in unicite_id.iter_rows(named=True):
-        if row["erreur"]:
-            _ajouter("Critique", "Unicite_ID", row["fichier"], row["erreur"] + ".")
-        elif row["nb_doublons"] and row["nb_doublons"] > 0:
-            _ajouter(
-                "Critique", "Unicite_ID", row["fichier"],
-                f"{row['nb_doublons']} identifiants dupliques sur {row['total_obs']} lignes.",
-            )
-
-    # 7. Top doublons d'ID : signale seulement le cas le plus extreme par fichier
-    if top_doublons_id.height > 0:
-        id_col = [c for c in top_doublons_id.columns if c not in ("fichier", "ANNEE", "MOIS", "nb_occurrences")][0]
-        pires = (
-            top_doublons_id.sort("nb_occurrences", descending=True)
-            .group_by("fichier", maintain_order=True)
-            .first()
-        )
-        for row in pires.iter_rows(named=True):
-            _ajouter(
-                "Attention", "Top_doublons_ID", row["fichier"],
-                f"Identifiant '{row[id_col]}' present {row['nb_occurrences']} fois (cas le plus extreme).",
-            )
-
-    # 10. Ecart de valeurs manquantes selon presence du salaire
-    for row in manquants_vs_salaire.iter_rows(named=True):
-        ecart = row["ecart_pts"]
-        if ecart is not None and abs(ecart) > _SEUIL_ECART_NA_VS_SALAIRE:
-            sens = "plus" if ecart > 0 else "moins"
-            _ajouter(
-                "Information", "Manquants_vs_Salaire", row["fichier"],
-                f"Quand '{salary_var}' est manquant, '{row['variable']}' est {sens} souvent "
-                f"manquant aussi (ecart de {abs(ecart)} points).",
-            )
-
-    if not constats:
-        return pl.DataFrame(schema={
-            "Niveau": pl.Utf8, "Controle": pl.Utf8, "Fichier": pl.Utf8, "Constat": pl.Utf8,
-        })
-
-    df = pl.DataFrame(constats)
-    ordre = pl.Series([_NIVEAU_ORDRE.get(n, 99) for n in df["Niveau"]])
-    return df.with_columns(ordre.alias("_ordre")).sort(["_ordre", "Fichier", "Controle"]).drop("_ordre")
+    ws.set_column(0, 0, 22)
+    ws.set_column(1, 1, 45)
+    ws.set_column(2, 2, 55)
+    ws.freeze_panes(header_row + 1, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -711,65 +710,11 @@ def _write_transition_sheet(
     ws.freeze_panes(1, 2)
 
 
-def _write_rapport_synthese_sheet(wb, df: pl.DataFrame, header_fmt, text_fmt) -> None:
-    """Ecrit la feuille de synthese des incoherences, coloree par niveau de gravite."""
-    ws = wb.add_worksheet("Rapport_Synthese")
-    ws.set_tab_color("#C0392B")
-
-    title_fmt = wb.add_format({"bold": True, "font_size": 14})
-    subtitle_fmt = wb.add_format({"italic": True, "font_color": "#7F8C8D"})
-    ws.write(0, 0, "Rapport de synthese des incoherences relevees", title_fmt)
-    ws.write(1, 0, f"Genere le {datetime.now().strftime('%d/%m/%Y a %H:%M')}", subtitle_fmt)
-
-    niveau_fmt = {
-        "Critique": wb.add_format({
-            "bg_color": "#F1948A", "border": 1, "bold": True, "text_wrap": True,
-        }),
-        "Attention": wb.add_format({
-            "bg_color": "#F9E79F", "border": 1, "text_wrap": True,
-        }),
-        "Information": wb.add_format({
-            "bg_color": "#AED6F1", "border": 1, "text_wrap": True,
-        }),
-    }
-    default_fmt = wb.add_format({"border": 1, "text_wrap": True})
-
-    header_row = 3
-    if df.height == 0:
-        ws.write(header_row, 0, "Aucune incoherence relevee au-dela des seuils definis.", text_fmt)
-        return
-
-    n_critique = (df["Niveau"] == "Critique").sum()
-    n_attention = (df["Niveau"] == "Attention").sum()
-    n_info = (df["Niveau"] == "Information").sum()
-    ws.write(2, 0, f"{df.height} constat(s) : {n_critique} critique(s), "
-                   f"{n_attention} a surveiller, {n_info} pour information.", text_fmt)
-
-    cols = df.columns
-    for ci, col_name in enumerate(cols):
-        ws.write(header_row, ci, col_name, header_fmt)
-
-    for ri in range(df.height):
-        niveau = df["Niveau"][ri]
-        fmt = niveau_fmt.get(niveau, default_fmt)
-        for ci, col_name in enumerate(cols):
-            value = df[col_name][ri]
-            ws.write(header_row + 1 + ri, ci, "" if value is None else str(value), fmt)
-
-    ws.set_column(0, 0, 12)
-    ws.set_column(1, 1, 20)
-    ws.set_column(2, 2, 16)
-    ws.set_column(3, 3, 80)
-    ws.freeze_panes(header_row + 1, 0)
-    ws.autofilter(header_row, 0, header_row + df.height, len(cols) - 1)
-
-
 def _export_audit_excel(
     cfg: PipelineConfig,
     output_bucket: str,
     output_object: str,
     *,
-    rapport: pl.DataFrame,
     doublons: pl.DataFrame,
     colonnes: pl.DataFrame,
     types: pl.DataFrame,
@@ -816,7 +761,7 @@ def _export_audit_excel(
             ("Manquants_vs_Salaire", manquants_vs_salaire),
         ]
 
-        _write_rapport_synthese_sheet(wb, rapport, header_fmt, text_fmt)
+        _write_guide_lecture_sheet(wb, header_fmt, text_fmt)
 
         for sheet_name, df in sheets:
             _write_standard_sheet(wb, sheet_name, df,
@@ -930,24 +875,9 @@ def executer_audit(
     logger.info("10/10 - Valeurs manquantes selon presence de {}...", salary_var)
     df_manquants_vs_salaire = _check_manquants_vs_salaire(data, salary_var=salary_var)
 
-    logger.info("Analyse des incoherences et generation du rapport de synthese...")
-    df_rapport = _build_rapport_synthese(
-        doublons=df_doublons, colonnes=df_colonnes, types=df_types,
-        valeurs_manquantes=df_missing, outliers=df_outliers,
-        unicite_id=df_unicite, top_doublons_id=df_top_dup,
-        manquants_vs_salaire=df_manquants_vs_salaire, salary_var=salary_var,
-    )
-    n_critique = (df_rapport["Niveau"] == "Critique").sum() if df_rapport.height else 0
-    n_attention = (df_rapport["Niveau"] == "Attention").sum() if df_rapport.height else 0
-    logger.info(
-        "Rapport de synthese : {} constat(s) ({} critique(s), {} a surveiller).",
-        df_rapport.height, n_critique, n_attention,
-    )
-
     logger.info("Export Excel...")
     _export_audit_excel(
         cfg, output_bucket, output_object,
-        rapport=df_rapport,
         doublons=df_doublons, colonnes=df_colonnes, types=df_types,
         valeurs_manquantes=df_missing, outliers=df_outliers,
         unicite_id=df_unicite, top_doublons_id=df_top_dup, transitions=df_transitions,
