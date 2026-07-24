@@ -34,7 +34,20 @@
       "Bash(echo \"--- xlsx audit files ---\" *)",
       "Read(//Users/macbookair/Desktop/CAE/Salaires/**)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('src/cnps/audit.py'\\).read\\(\\)\\)\")",
-      "Bash(.venv/bin/python -c \"import polars; print\\(polars.__version__\\)\")"
+      "Bash(.venv/bin/python -c \"import polars; print\\(polars.__version__\\)\")",
+      "Bash(.venv/bin/python -c \"import json; nb=json.load\\(open\\('data_exploration_v2.ipynb'\\)\\); print\\(len\\(nb['cells']\\), 'cells'\\)\")",
+      "Bash(.venv/bin/python -)",
+      "Bash(.venv/bin/python -c \"import matplotlib; print\\('matplotlib', matplotlib.__version__\\)\")",
+      "Bash(.venv/bin/python -c \"import seaborn; print\\('seaborn', seaborn.__version__\\)\")",
+      "Bash(.venv/bin/python -c \"import plotly; print\\('plotly', plotly.__version__\\)\")",
+      "Bash(.venv/bin/python -c \"import ipykernel; print\\('ipykernel ok'\\)\")",
+      "Bash(.venv/bin/python -c \"import jupyter; print\\('jupyter ok'\\)\")",
+      "Bash(.venv/bin/python /private/tmp/claude-501/-Users-macbookair-Desktop-CAE-Salaires-CNPS-TREATMENT-V2/b5b64c2c-9488-4758-827c-669df046fba2/scratchpad/build_notebook.py)",
+      "Bash(.venv/bin/python -c \"import json; nb=json.load\\(open\\('analyse_incoherences_salaires.ipynb'\\)\\); print\\(len\\(nb['cells']\\), 'cells, valid JSON'\\)\")",
+      "Bash(.venv/bin/python -c \"import nbconvert\")",
+      "Bash(.venv/bin/jupyter --version)",
+      "Bash(vm_stat)",
+      "Bash(sysctl hw.memsize)"
     ],
     "additionalDirectories": [
       "/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2"
