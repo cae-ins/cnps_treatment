@@ -16,7 +16,10 @@ Controles
 2. Colonnes            — Coherence des colonnes entre fichiers (vs reference)
 3. Types_variables     — Incoherences de type entre fichiers
 4. Valeurs_manquantes  — Taux de valeurs manquantes par variable et fichier
-5. Outliers_Salaire    — Detection de valeurs extremes (methode IQR) sur SALAIRE_BRUT
+5. Outliers_Salaire    — Detection de valeurs extremes (methode IQR) sur SALAIRE_BRUT,
+                          calculee globalement et separement par periodicite
+                          declaree (TYPE_SALARIE), pour ne pas melanger des
+                          echelles de salaire incomparables (mensuel/journalier/horaire)
 6. Unicite_ID          — Unicite de ID_INDIV par fichier
 7. Top_doublons_ID     — Top 5% des individus les plus dupliques par mois
 8. Transitions_ID      — Matrice de transition : proportion d'ID presents
@@ -26,10 +29,21 @@ Controles
 10. Manquants_vs_Salaire — Taux de valeurs manquantes de chaque variable,
                           compare entre les lignes ou SALAIRE_BRUT est
                           renseigne et celles ou il est manquant
+11. Analyse_Salaire    — Analyse ciblee de SALAIRE_BRUT croisee avec sa
+                          periodicite declaree (TYPE_SALARIE) : seuils
+                          plausibles derives du SMIG, salaires nuls/negatifs/
+                          sous seuil, confusions d'unite suspectees (ex. un
+                          taux journalier declare comme salaire mensuel)
 
 Sortie : un classeur Excel avec une feuille par controle, precede d'une
 feuille "Guide_Lecture" qui explique, pour chaque feuille du classeur,
 son objectif et comment l'interpreter.
+
+Pour une exploration plus approfondie (graphiques de distribution, croisements
+avec le profil des employeurs/salaries, concentration des anomalies par
+entreprise ou individu), voir le notebook ``analyse_incoherences_salaires.ipynb``
+a la racine du depot, qui complete cet audit automatise plutot que de le
+dupliquer.
 
 Comme jointure_anstat.py, ce script est explicitement hors du DAG numerote
 01-12 (voir orchestrator.py::discover_stages) : il ne sera jamais execute
@@ -230,40 +244,183 @@ def _check_manquants_vs_salaire(
     return pl.DataFrame(rows)
 
 
+# Duree standard utilisee pour deriver un seuil plausible journalier/horaire
+# a partir du SMIG mensuel (cfg.cleaning.min_salary) : 26 jours ouvres/mois,
+# 8h/jour (soit 208h/mois). Convention documentaire, ajustable si besoin.
+_JOURS_OUVRES_PAR_MOIS = 26
+_HEURES_PAR_MOIS = 208
+
+_LABEL_PERIODICITE = {"M": "Mensuel", "J": "Journalier", "H": "Horaire"}
+
+
+def _check_analyse_salaire(
+    data: list[tuple[str, int, int, pl.DataFrame]],
+    salary_var: str = "SALAIRE_BRUT",
+    type_var: str = "TYPE_SALARIE",
+    duree_var: str = "DUREE_TRAVAILLEE",
+    smig_mensuel: float = 75_000.0,
+) -> pl.DataFrame:
+    """
+    11. Analyse ciblee de SALAIRE_BRUT croisee avec sa periodicite declaree
+    (``TYPE_SALARIE`` : M/J/H).
+
+    Pour chaque fichier et chaque periodicite (plus une ligne "TOUTES"),
+    calcule :
+    - le nombre de declarations et le taux de valeurs manquantes ;
+    - le seuil plausible derive du SMIG mensuel (identique, /26 ou /208
+      selon la periodicite) ;
+    - le nombre de salaires nuls, negatifs, ou sous ce seuil ;
+    - le nombre de salaires "suspects" d'une confusion d'unite : un salaire
+      mensuel dont le montant ressemble a un taux journalier/horaire, ou
+      inversement un salaire journalier/horaire dont le montant ressemble a
+      un salaire mensuel complet.
+
+    Reprend la logique du notebook ``analyse_incoherences_salaires.ipynb``
+    (section 4-5), condensee au niveau fichier pour rester exploitable dans
+    un classeur d'audit plutot qu'en exploration ligne a ligne.
+    """
+    seuil_journalier = smig_mensuel / _JOURS_OUVRES_PAR_MOIS
+    seuil_horaire = smig_mensuel / _HEURES_PAR_MOIS
+    seuil_par_type = {"M": smig_mensuel, "J": seuil_journalier, "H": seuil_horaire}
+
+    rows = []
+    for fname, mois, annee, df in data:
+        if salary_var not in df.columns:
+            continue
+
+        has_type = type_var in df.columns
+        type_values = (
+            df[type_var].unique().drop_nulls().sort().to_list() if has_type else []
+        )
+        groupes: list[tuple[str, pl.DataFrame]] = [("TOUTES", df)]
+        if has_type:
+            groupes.extend(
+                (str(tv), df.filter(pl.col(type_var) == tv)) for tv in type_values
+            )
+
+        for label, sous_df in groupes:
+            n_tot = sous_df.height
+            if n_tot == 0:
+                continue
+
+            sal = sous_df[salary_var]
+            n_manquant = sal.null_count()
+            sal_non_null = sal.drop_nulls()
+            n_negatif = sal_non_null.filter(sal_non_null < 0).len()
+            n_nul = sal_non_null.filter(sal_non_null == 0).len()
+
+            seuil = seuil_par_type.get(label)
+            if seuil is not None:
+                n_sous_seuil = sal_non_null.filter(
+                    (sal_non_null > 0) & (sal_non_null < seuil)
+                ).len()
+            else:
+                n_sous_seuil = None
+
+            n_confusion_unite = None
+            if label == "M":
+                n_confusion_unite = sal_non_null.filter(
+                    (sal_non_null > 0) & (sal_non_null < seuil_journalier * 3)
+                ).len()
+            elif label in ("J", "H"):
+                n_confusion_unite = sal_non_null.filter(sal_non_null >= smig_mensuel).len()
+
+            duree_incoherente = None
+            if duree_var in sous_df.columns:
+                duree = sous_df[duree_var]
+                duree_incoherente = sous_df.filter(
+                    (pl.col(duree_var) > 31)
+                    | ((pl.col(duree_var) == 0) & pl.col(salary_var).is_not_null() & (pl.col(salary_var) > 0))
+                ).height if duree.null_count() < n_tot else None
+
+            rows.append({
+                "fichier": fname,
+                "ANNEE": annee,
+                "MOIS": mois,
+                "periodicite": _LABEL_PERIODICITE.get(label, label),
+                "total_obs": n_tot,
+                "seuil_plausible": round(seuil, 2) if seuil is not None else None,
+                "nb_manquant": n_manquant,
+                "pct_manquant": round(n_manquant / n_tot * 100, 2),
+                "nb_negatif": n_negatif,
+                "nb_nul_zero": n_nul,
+                "nb_sous_seuil_plausible": n_sous_seuil,
+                "pct_sous_seuil_plausible": (
+                    round(n_sous_seuil / n_tot * 100, 2) if n_sous_seuil is not None else None
+                ),
+                "nb_confusion_unite_suspectee": n_confusion_unite,
+                "pct_confusion_unite_suspectee": (
+                    round(n_confusion_unite / n_tot * 100, 2) if n_confusion_unite is not None else None
+                ),
+                "nb_duree_travaillee_incoherente": duree_incoherente,
+            })
+
+    if not rows:
+        return pl.DataFrame(schema={
+            "fichier": pl.Utf8, "ANNEE": pl.Int64, "MOIS": pl.Int64, "periodicite": pl.Utf8,
+            "total_obs": pl.Int64, "seuil_plausible": pl.Float64,
+            "nb_manquant": pl.Int64, "pct_manquant": pl.Float64,
+            "nb_negatif": pl.Int64, "nb_nul_zero": pl.Int64,
+            "nb_sous_seuil_plausible": pl.Int64, "pct_sous_seuil_plausible": pl.Float64,
+            "nb_confusion_unite_suspectee": pl.Int64, "pct_confusion_unite_suspectee": pl.Float64,
+            "nb_duree_travaillee_incoherente": pl.Int64,
+        })
+    return pl.DataFrame(rows)
+
+
 def _check_outliers(data: list[tuple[str, int, int, pl.DataFrame]],
                     variable: str = "SALAIRE_BRUT",
-                    iqr_multiplier: float = 1.5) -> pl.DataFrame:
-    """5. Detection de valeurs extremes (methode IQR) sur une variable de salaire."""
+                    iqr_multiplier: float = 1.5,
+                    type_var: str = "TYPE_SALARIE") -> pl.DataFrame:
+    """
+    5. Detection de valeurs extremes (methode IQR) sur une variable de salaire.
+
+    Calcule les bornes IQR globalement (toutes periodicites confondues, ligne
+    "TOUS") et separement pour chaque valeur de ``type_var`` presente (ex.
+    "M"/"J"/"H") si la colonne existe : un salaire journalier melange a des
+    salaires mensuels fausserait sinon completement les quartiles.
+    """
     rows = []
     for fname, mois, annee, df in data:
         if variable not in df.columns:
             continue
-        x = df[variable].drop_nulls()
-        if x.len() == 0:
-            continue
-        q1 = x.quantile(0.25)
-        q3 = x.quantile(0.75)
-        iqr = q3 - q1
-        lo = q1 - iqr_multiplier * iqr
-        hi = q3 + iqr_multiplier * iqr
-        nb_outliers = x.filter((x < lo) | (x > hi)).len()
-        rows.append({
-            "fichier": fname,
-            "ANNEE": annee,
-            "MOIS": mois,
-            "variable": variable,
-            "Q1": round(q1, 2),
-            "Q3": round(q3, 2),
-            "IQR": round(iqr, 2),
-            "borne_basse": round(lo, 2),
-            "borne_haute": round(hi, 2),
-            "nb_outliers": nb_outliers,
-            "pct_outliers": round(nb_outliers / x.len() * 100, 2),
-        })
+
+        groupes: list[tuple[str, pl.Series]] = []
+        x_tous = df[variable].drop_nulls()
+        if x_tous.len() > 0:
+            groupes.append(("TOUS", x_tous))
+
+        if type_var in df.columns:
+            for type_value in df[type_var].unique().drop_nulls().sort().to_list():
+                x_type = df.filter(pl.col(type_var) == type_value)[variable].drop_nulls()
+                if x_type.len() > 0:
+                    groupes.append((str(type_value), x_type))
+
+        for label, x in groupes:
+            q1 = x.quantile(0.25)
+            q3 = x.quantile(0.75)
+            iqr = q3 - q1
+            lo = q1 - iqr_multiplier * iqr
+            hi = q3 + iqr_multiplier * iqr
+            nb_outliers = x.filter((x < lo) | (x > hi)).len()
+            rows.append({
+                "fichier": fname,
+                "ANNEE": annee,
+                "MOIS": mois,
+                "variable": variable,
+                "periodicite": label,
+                "Q1": round(q1, 2),
+                "Q3": round(q3, 2),
+                "IQR": round(iqr, 2),
+                "borne_basse": round(lo, 2),
+                "borne_haute": round(hi, 2),
+                "nb_outliers": nb_outliers,
+                "pct_outliers": round(nb_outliers / x.len() * 100, 2),
+            })
     if not rows:
         return pl.DataFrame(schema={
             "fichier": pl.Utf8, "ANNEE": pl.Int64, "MOIS": pl.Int64,
-            "variable": pl.Utf8, "Q1": pl.Float64, "Q3": pl.Float64,
+            "variable": pl.Utf8, "periodicite": pl.Utf8, "Q1": pl.Float64, "Q3": pl.Float64,
             "IQR": pl.Float64, "borne_basse": pl.Float64, "borne_haute": pl.Float64,
             "nb_outliers": pl.Int64, "pct_outliers": pl.Float64,
         })
@@ -501,10 +658,15 @@ _GUIDE_LECTURE: list[tuple[str, str, str]] = [
     (
         "Outliers_Salaire",
         "Reperer les valeurs extremes de SALAIRE_BRUT via la methode des "
-        "quartiles (IQR) : tout ce qui sort de [Q1 - 1.5*IQR, Q3 + 1.5*IQR].",
+        "quartiles (IQR) : tout ce qui sort de [Q1 - 1.5*IQR, Q3 + 1.5*IQR]. "
+        "Calcule a la fois globalement (ligne 'TOUS') et separement pour "
+        "chaque periodicite declaree (M/J/H, cf. TYPE_SALARIE).",
         "Une part importante de valeurs hors bornes peut signaler des erreurs "
         "de saisie (salaires en centimes au lieu de francs, doubles zeros, "
-        "etc.) ou une population reellement heterogene a examiner au cas par cas.",
+        "etc.) ou une population reellement heterogene a examiner au cas par cas. "
+        "Comparer les lignes par periodicite evite qu'un salaire journalier, "
+        "mecaniquement plus petit, ne soit compte a tort comme un outlier bas "
+        "dans une distribution dominee par des salaires mensuels.",
     ),
     (
         "Unicite_ID",
@@ -546,6 +708,20 @@ _GUIDE_LECTURE: list[tuple[str, str, str]] = [
         "Une retention faible d'un mois sur l'autre peut traduire un turnover "
         "reel, mais aussi un probleme de generation d'identifiant si la chute "
         "est brutale et generalisee sur toute une periode.",
+    ),
+    (
+        "Analyse_Salaire",
+        "Croiser SALAIRE_BRUT avec sa periodicite declaree (TYPE_SALARIE : "
+        "Mensuel/Journalier/Horaire) : seuil plausible derive du SMIG pour "
+        "chaque periodicite, salaires nuls/negatifs/sous ce seuil, et "
+        "confusions d'unite suspectees (ex. un taux journalier declare comme "
+        "salaire mensuel, ou l'inverse).",
+        "Une periodicite non renseignee empeche toute verification de "
+        "coherence du montant. Un volume important de confusions d'unite "
+        "suspectees pointe vers un probleme de saisie du formulaire cote "
+        "employeur plutot qu'une erreur isolee. Pour une exploration plus "
+        "fine (par secteur, taille d'entreprise, concentration par employeur "
+        "ou individu), voir le notebook analyse_incoherences_salaires.ipynb.",
     ),
 ]
 
@@ -725,6 +901,7 @@ def _export_audit_excel(
     transitions: pl.DataFrame,
     distribution: pl.DataFrame,
     manquants_vs_salaire: pl.DataFrame,
+    analyse_salaire: pl.DataFrame,
 ) -> None:
     """Ecrit tous les DataFrames d'audit dans un classeur Excel sur MinIO."""
     def _write(buf: io.BytesIO) -> None:
@@ -759,6 +936,7 @@ def _export_audit_excel(
             ("Top_doublons_ID", top_doublons_id),
             ("Distribution", distribution),
             ("Manquants_vs_Salaire", manquants_vs_salaire),
+            ("Analyse_Salaire", analyse_salaire),
         ]
 
         _write_guide_lecture_sheet(wb, header_fmt, text_fmt)
@@ -788,6 +966,7 @@ def executer_audit(
     output_prefix: str | None = None,
     salary_var: str = "SALAIRE_BRUT",
     id_var: str = "ID_INDIV",
+    type_var: str = "TYPE_SALARIE",
     iqr_multiplier: float = 1.5,
 ) -> str:
     """
@@ -813,6 +992,9 @@ def executer_audit(
         Colonne utilisee pour la detection de valeurs extremes.
     id_var : str
         Colonne utilisee pour le controle d'unicite.
+    type_var : str
+        Colonne de periodicite du salaire (M/J/H), utilisee pour ventiler
+        Outliers_Salaire et Analyse_Salaire par periodicite.
     iqr_multiplier : float
         Multiplicateur IQR pour les bornes de valeurs extremes (1.5 par defaut).
 
@@ -845,35 +1027,42 @@ def executer_audit(
 
     logger.info("Fichiers a auditer : {}", len(data))
 
-    logger.info("1/10 - Verification des doublons...")
+    logger.info("1/11 - Verification des doublons...")
     df_doublons = _check_doublons(data)
 
-    logger.info("2/10 - Verification des colonnes...")
+    logger.info("2/11 - Verification des colonnes...")
     df_colonnes = _check_colonnes(data)
 
-    logger.info("3/10 - Verification des types...")
+    logger.info("3/11 - Verification des types...")
     df_types = _check_types(data)
 
-    logger.info("4/10 - Verification des valeurs manquantes...")
+    logger.info("4/11 - Verification des valeurs manquantes...")
     df_missing = _check_valeurs_manquantes(data)
 
-    logger.info("5/10 - Detection des outliers ({})...", salary_var)
-    df_outliers = _check_outliers(data, variable=salary_var, iqr_multiplier=iqr_multiplier)
+    logger.info("5/11 - Detection des outliers ({}, par periodicite {})...", salary_var, type_var)
+    df_outliers = _check_outliers(
+        data, variable=salary_var, iqr_multiplier=iqr_multiplier, type_var=type_var
+    )
 
-    logger.info("6/10 - Verification de l'unicite des ID ({})...", id_var)
+    logger.info("6/11 - Verification de l'unicite des ID ({})...", id_var)
     df_unicite = _check_unicite_id(data, id_var=id_var)
 
-    logger.info("7/10 - Top 5% des ID les plus dupliques ({})...", id_var)
+    logger.info("7/11 - Top 5% des ID les plus dupliques ({})...", id_var)
     df_top_dup = _check_top_doublons_id(data, id_var=id_var)
 
-    logger.info("8/10 - Matrice de transitions des ID ({})...", id_var)
+    logger.info("8/11 - Matrice de transitions des ID ({})...", id_var)
     df_transitions = _check_transitions(data, id_var=id_var)
 
-    logger.info("9/10 - Distribution des variables numeriques...")
+    logger.info("9/11 - Distribution des variables numeriques...")
     df_distribution = _check_distribution(data)
 
-    logger.info("10/10 - Valeurs manquantes selon presence de {}...", salary_var)
+    logger.info("10/11 - Valeurs manquantes selon presence de {}...", salary_var)
     df_manquants_vs_salaire = _check_manquants_vs_salaire(data, salary_var=salary_var)
+
+    logger.info("11/11 - Analyse du salaire par periodicite declaree ({})...", type_var)
+    df_analyse_salaire = _check_analyse_salaire(
+        data, salary_var=salary_var, type_var=type_var, smig_mensuel=cfg.cleaning.min_salary
+    )
 
     logger.info("Export Excel...")
     _export_audit_excel(
@@ -882,6 +1071,7 @@ def executer_audit(
         valeurs_manquantes=df_missing, outliers=df_outliers,
         unicite_id=df_unicite, top_doublons_id=df_top_dup, transitions=df_transitions,
         distribution=df_distribution, manquants_vs_salaire=df_manquants_vs_salaire,
+        analyse_salaire=df_analyse_salaire,
     )
 
     logger.info("Fichier d'audit genere : {}", output_object)
@@ -925,6 +1115,8 @@ if __name__ == "__main__":
     parser.add_argument("--dimensions", "-d", type=Path, default=None)
     parser.add_argument("--salary-var", default="SALAIRE_BRUT")
     parser.add_argument("--id-var", default="ID_INDIV")
+    parser.add_argument("--type-var", default="TYPE_SALARIE",
+                         help="Colonne de periodicite du salaire (M/J/H)")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -947,6 +1139,7 @@ if __name__ == "__main__":
             cfg, args.stage,
             salary_var=args.salary_var,
             id_var=args.id_var,
+            type_var=args.type_var,
         )
         logger.info("Termine avec succes.")
     except Exception as exc:

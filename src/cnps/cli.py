@@ -207,6 +207,7 @@ def audit(
     ),
     salary_var: str = typer.Option("SALAIRE_BRUT", "--salary-var", help="Colonne pour la detection de valeurs extremes"),
     id_var: str = typer.Option("ID_INDIV", "--id-var", help="Colonne pour le controle d'unicite"),
+    type_var: str = typer.Option("TYPE_SALARIE", "--type-var", help="Colonne de periodicite du salaire (M/J/H)"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Execute un audit qualite complet et genere un rapport Excel."""
@@ -222,6 +223,7 @@ def audit(
         output_prefix=output_prefix,
         salary_var=salary_var,
         id_var=id_var,
+        type_var=type_var,
     )
     console.print(f"[bold green]Rapport d'audit genere:[/bold green] {out}")
 

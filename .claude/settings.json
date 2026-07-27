@@ -47,7 +47,9 @@
       "Bash(.venv/bin/python -c \"import nbconvert\")",
       "Bash(.venv/bin/jupyter --version)",
       "Bash(vm_stat)",
-      "Bash(sysctl hw.memsize)"
+      "Bash(sysctl hw.memsize)",
+      "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('src/cnps/audit.py'\\).read\\(\\)\\)\")",
+      "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('src/cnps/cli.py'\\).read\\(\\)\\)\")"
     ],
     "additionalDirectories": [
       "/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2"
