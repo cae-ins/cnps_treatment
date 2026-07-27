@@ -4,11 +4,21 @@ Audit qualite par etape (a la demande, hors sequence du pipeline).
 Reprend les controles qualite issus de CNPS_TREATMENT_PROJECT
 (01_inconsistency_check.R), adaptes au pipeline V2 (Polars + Parquet), et
 les dispatche selon l'etape numerotee du pipeline dont on veut auditer la
-sortie. A ce jour, seule l'etape 01 (01_lecture_fichiers.py) est
-implementee : elle audite silver/cnps/, c'est-a-dire les fichiers Parquet
-tels que convertis par l'etape 01, AVANT l'harmonisation de type de
-l'etape 02 — le point le plus proche des fichiers CNPS originaux tout en
-restant exploitable en Parquet.
+sortie. Deux etapes sont implementees :
+
+- Etape 01 (01_lecture_fichiers.py) : audite silver/cnps/, c'est-a-dire les
+  fichiers Parquet tels que convertis par l'etape 01, AVANT l'harmonisation
+  de type de l'etape 02 — le point le plus proche des fichiers CNPS
+  originaux tout en restant exploitable en Parquet. Une entree par fichier
+  mensuel (``MM_AAAA.parquet``).
+- Etape 03 (03_nettoyage_donnees.py) : audite gold/cnps/cnps_cleaned.parquet,
+  le fichier UNIQUE deja concatene et nettoye (doublons, TAG, types exclus,
+  salaire minimum, variables derivees, winsorisation). Contrairement a
+  l'etape 01, il n'existe pas de serie de fichiers mensuels a cette etape :
+  le fichier est re-partitionne EN MEMOIRE par periode (colonne PERIOD ou
+  ANNEE+MOIS, deja presentes dans les donnees) pour retomber sur le meme
+  format qu'une serie mensuelle et reutiliser tous les controles ci-dessous
+  sans modification. Aucune ecriture supplementaire sur MinIO.
 
 Controles
 ---------
@@ -52,6 +62,7 @@ automatiquement par l'orchestrateur, uniquement a la demande.
 Usage
 -----
     python src/cnps/audit.py --stage 01
+    python src/cnps/audit.py --stage 03
     python src/cnps/audit.py --stage 01 --verbose
 """
 
@@ -65,7 +76,7 @@ import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig
-from cnps.storage import list_objects, read_parquet, write_workbook
+from cnps.storage import list_objects, object_exists, read_parquet, write_workbook
 
 _FILENAME_RE = re.compile(r"^(\d{2})_(\d{4})\.parquet$")
 
@@ -73,7 +84,7 @@ _HEADER_COLOR = "#2C3E50"
 _HEADER_FONT = "#FFFFFF"
 _ALT_ROW_COLOR = "#F2F3F4"
 
-_ETAPES_DISPONIBLES = ("01",)
+_ETAPES_DISPONIBLES = ("01", "03")
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +113,57 @@ def _load_files(minio_cfg, bucket: str, prefix: str) -> list[tuple[str, int, int
         result.append((filename, mois, annee, df))
     result.sort(key=lambda x: (x[2], x[1]))
     return result
+
+
+def _load_cleaned_file(minio_cfg, bucket: str, prefix: str) -> list[tuple[str, int, int, pl.DataFrame]]:
+    """
+    Charge le fichier Parquet UNIQUE issu de l'etape 03 (cnps_cleaned.parquet,
+    deja concatene sur tous les mois) et le re-partitionne en memoire par
+    periode, pour retomber sur le meme format ``[(nom_virtuel, mois, annee,
+    sous_df), ...]`` que ``_load_files`` (une entree par mois).
+
+    Aucune ecriture n'est faite : le decoupage par periode est reconstruit a
+    la volee a partir de la colonne PERIOD (ou ANNEE+MOIS a defaut), deja
+    presente dans les donnees depuis les fichiers sources d'origine — ce
+    n'est PAS une nouvelle segmentation en fichiers sur MinIO, uniquement une
+    vue en memoire permettant de reutiliser tels quels tous les controles
+    existants (par mois, matrice de transition, etc.).
+    """
+    object_name = f"{prefix}cnps_cleaned.parquet"
+    if not object_exists(minio_cfg, bucket, object_name):
+        return []
+
+    df = read_parquet(minio_cfg, bucket, object_name)
+
+    if "PERIOD" in df.columns:
+        group_cols = ["PERIOD"]
+    elif "ANNEE" in df.columns and "MOIS" in df.columns:
+        group_cols = ["ANNEE", "MOIS"]
+    else:
+        # Pas de colonne de periode exploitable : un seul bloc, pas de
+        # decoupage par mois possible (matrice de transition alors vide).
+        return [("cnps_cleaned.parquet", 0, 0, df)]
+
+    result = []
+    for key, sous_df in df.group_by(group_cols, maintain_order=True):
+        if group_cols == ["PERIOD"]:
+            (period,) = key
+            mois, annee = _parse_period_label(period)
+        else:
+            annee, mois = key
+        label = f"cnps_cleaned_{annee:04d}-{mois:02d}.parquet"
+        result.append((label, mois, annee, sous_df))
+
+    result.sort(key=lambda x: (x[2], x[1]))
+    return result
+
+
+def _parse_period_label(period: str) -> tuple[int, int]:
+    """Extrait (MOIS, ANNEE) d'une valeur PERIOD au format 'AAAA-MM'."""
+    m = re.match(r"^(\d{4})-(\d{2})$", str(period))
+    if m:
+        return int(m.group(2)), int(m.group(1))
+    return 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -968,6 +1030,7 @@ def executer_audit(
     id_var: str = "ID_INDIV",
     type_var: str = "TYPE_SALARIE",
     iqr_multiplier: float = 1.5,
+    _load_fn=_load_files,
 ) -> str:
     """
     Execute l'audit qualite complet et exporte les resultats en Excel sur MinIO.
@@ -997,6 +1060,12 @@ def executer_audit(
         Outliers_Salaire et Analyse_Salaire par periodicite.
     iqr_multiplier : float
         Multiplicateur IQR pour les bornes de valeurs extremes (1.5 par defaut).
+    _load_fn : callable, optional
+        Fonction de chargement ``(minio_cfg, bucket, prefix) -> data``, utilisee
+        par ``executer_audit_etape`` pour adapter la source selon l'etape
+        auditee (serie de fichiers mensuels pour l'etape 01 via ``_load_files``,
+        fichier unique deja concatene re-partitionne par periode pour l'etape
+        03 via ``_load_cleaned_file``). Usage interne, ne pas passer directement.
 
     Returns
     -------
@@ -1020,7 +1089,7 @@ def executer_audit(
     logger.info("=" * 60)
     logger.info("Source : {}/{}", input_bucket, input_prefix)
 
-    data = _load_files(cfg.minio, input_bucket, input_prefix)
+    data = _load_fn(cfg.minio, input_bucket, input_prefix)
     if not data:
         logger.warning("Aucun fichier parquet trouve sous : {}/{}", input_bucket, input_prefix)
         return output_object
@@ -1089,6 +1158,18 @@ def executer_audit_etape(cfg: PipelineConfig, stage: str, **kwargs) -> str:
         # input_bucket/input_prefix explicitement pour cibler sa propre
         # sortie (ex. gold/cnps/ apres harmonisation).
         return executer_audit(cfg, **kwargs)
+
+    if stage == "03":
+        # Sortie de 03_nettoyage_donnees.py : UN SEUL fichier deja concatene
+        # (cleaned_bucket/cleaned_prefix/cnps_cleaned.parquet), contrairement
+        # a la serie mensuelle de l'etape 01. _load_cleaned_file re-partitionne
+        # ce fichier unique par periode (PERIOD ou ANNEE+MOIS) pour reutiliser
+        # tels quels tous les controles existants (par mois, matrice de
+        # transition, etc.), sans qu'aucun nouveau fichier ne soit ecrit sur
+        # MinIO : c'est une vue en memoire, pas une nouvelle segmentation.
+        kwargs.setdefault("input_bucket", cfg.minio.cleaned_bucket)
+        kwargs.setdefault("input_prefix", cfg.minio.cleaned_prefix)
+        return executer_audit(cfg, _load_fn=_load_cleaned_file, **kwargs)
 
     raise ValueError(
         f"Etape '{stage}' non implementee. "

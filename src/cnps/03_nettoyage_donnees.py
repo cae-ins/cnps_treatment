@@ -105,7 +105,11 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
     Etapes
     ------
     1. Concatenation de tous les Parquets mensuels
-    2. Regles metier : doublons, types d'employes exclus, salaire minimum
+    2. Regles metier : doublons (lignes strictement identiques + colonne TAG),
+       doublons ID_INDIV+ID_EMPLOYEUR+mois (meme employeur, salaire le plus
+       eleve conserve ; les cumuls d'emplois chez des employeurs differents
+       ne sont pas touches), types d'employes exclus, salaire minimum
+       (negatifs/nuls/sous-seuil, cf. commentaire au point d'exclusion)
     3. Calcul des variables derivees (ages, anciennete, classes)
     4. Winsorisation des valeurs extremes de salaire
     5. Ecriture du Parquet nettoye
@@ -151,6 +155,40 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
         df = df.unique()
         logger.info("Doublons supprimes : {} -> {} lignes", n_avant, df.height)
 
+    # TAG (deja calcule cote source) classe chaque ligne selon un niveau de
+    # doublon detecte en amont ("unique", "doublon_niv_1".."doublon_niv_4").
+    # On ne garde que les lignes uniques : les niveaux de doublon partagent
+    # une cle de correspondance (probablement individu/employeur/periode)
+    # avec au moins une autre ligne du jeu de donnees et ne doivent pas etre
+    # comptes deux fois dans les traitements en aval.
+    if "TAG" in df.columns:
+        n_avant = df.height
+        df = df.filter(pl.col("TAG") == "unique")
+        logger.info("Lignes non uniques (TAG != 'unique') exclues : {} -> {} lignes",
+                     n_avant, df.height)
+
+    # Doublons d'ID_INDIV au sein d'un meme mois, chez le MEME employeur :
+    # un individu ne devrait avoir qu'une seule declaration par employeur et
+    # par mois (contrairement a un cumul d'emplois legitime chez PLUSIEURS
+    # employeurs differents, jamais touche ici). En cas de doublon reel
+    # (meme individu, meme employeur, meme mois), on ne garde que la ligne
+    # au salaire le plus eleve : les lignes en trop sont le plus souvent des
+    # sous-declarations partielles ou des saisies incompletes, le montant le
+    # plus eleve etant la meilleure approximation disponible du salaire
+    # effectivement verse ce mois-la.
+    _cols_periode = [c for c in ("PERIOD", "ANNEE", "MOIS") if c in df.columns]
+    if "ID_INDIV" in df.columns and "ID_EMPLOYEUR" in df.columns and _cols_periode and "SALAIRE_BRUT" in df.columns:
+        n_avant = df.height
+        cle_dedup = ["ID_INDIV", "ID_EMPLOYEUR", *_cols_periode]
+        df = (
+            df.sort("SALAIRE_BRUT", descending=True, nulls_last=True)
+            .unique(subset=cle_dedup, keep="first", maintain_order=True)
+        )
+        logger.info(
+            "Doublons ID_INDIV+ID_EMPLOYEUR par mois (meme employeur, salaire le plus eleve conserve) : {} -> {} lignes",
+            n_avant, df.height,
+        )
+
     if "TYPE_SALARIE" in df.columns and cfg.cleaning.exclude_employee_types:
         n_avant = df.height
         df = df.filter(
@@ -160,11 +198,36 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
                      cfg.cleaning.exclude_employee_types, n_avant, df.height)
 
     if "SALAIRE_BRUT" in df.columns:
+        # Ce filtre unique (SALAIRE_BRUT >= min_salary) exclut en une seule
+        # passe TROIS categories distinctes d'incoherence, toutes < min_salary :
+        #   - les salaires negatifs (impossibles en toute circonstance) ;
+        #   - les salaires nuls / a zero ;
+        #   - les salaires positifs mais sous le seuil (SMIG mensuel, 75 000
+        #     FCFA par defaut, cf. cleaning.min_salary dans settings.yaml).
+        # Les valeurs SALAIRE_BRUT.is_null() sont explicitement exemptees
+        # (conservees telles quelles, une absence de salaire n'est pas la
+        # meme incoherence qu'un montant errone).
+        # Le detail par categorie (nb negatifs, nb nuls, nb sous-seuil) est
+        # logue separement ci-dessous a titre informatif uniquement : il ne
+        # s'agit PAS de trois filtres distincts, seulement d'un decompte pour
+        # la tracabilite -- la ligne est bien retiree en une seule fois par
+        # le filtre ci-dessous, quelle que soit sa categorie.
+        n_negatifs = df.filter(pl.col("SALAIRE_BRUT") < 0).height
+        n_nuls = df.filter(pl.col("SALAIRE_BRUT") == 0).height
+        n_sous_seuil = df.filter(
+            (pl.col("SALAIRE_BRUT") > 0) & (pl.col("SALAIRE_BRUT") < cfg.cleaning.min_salary)
+        ).height
+        logger.info(
+            "Detail des salaires sous le seuil minimum ({:.0f}) a exclure : "
+            "{} negatifs, {} nuls (zero), {} positifs sous le seuil",
+            cfg.cleaning.min_salary, n_negatifs, n_nuls, n_sous_seuil,
+        )
+
         n_avant = df.height
         df = df.filter(
             pl.col("SALAIRE_BRUT").is_null() | (pl.col("SALAIRE_BRUT") >= cfg.cleaning.min_salary)
         )
-        logger.info("Salaires sous le seuil minimum ({:.0f}) exclus : {} -> {} lignes",
+        logger.info("Salaires sous le seuil minimum ({:.0f}) exclus (negatifs+nuls+sous-seuil) : {} -> {} lignes",
                      cfg.cleaning.min_salary, n_avant, df.height)
 
     # --- 2. Variables derivees ---

@@ -49,7 +49,15 @@
       "Bash(vm_stat)",
       "Bash(sysctl hw.memsize)",
       "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('src/cnps/audit.py'\\).read\\(\\)\\)\")",
-      "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('src/cnps/cli.py'\\).read\\(\\)\\)\")"
+      "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('src/cnps/cli.py'\\).read\\(\\)\\)\")",
+      "Bash(.venv/bin/pip list *)",
+      "Bash(ls -la \"/Users/macbookair/Downloads/Audit_incoherences_declarations_salaires_CNPS.docx\")",
+      "Read(//Users/macbookair/Downloads/**)",
+      "Bash(.venv/bin/python -c \"import matplotlib\")",
+      "Bash(sed 's/NB_PATH = \"analyse_incoherences_salaires.ipynb\"/NB_PATH = \"\\\\/private\\\\/tmp\\\\/claude-501\\\\/-Users-macbookair-Desktop-CAE-Salaires-CNPS-TREATMENT-V2\\\\/b5b64c2c-9488-4758-827c-669df046fba2\\\\/scratchpad\\\\/test_notebook.ipynb\"/' /private/tmp/claude-501/-Users-macbookair-Desktop-CAE-Salaires-CNPS-TREATMENT-V2/b5b64c2c-9488-4758-827c-669df046fba2/scratchpad/execute_notebook.py)",
+      "Bash(.venv/bin/python /private/tmp/claude-501/-Users-macbookair-Desktop-CAE-Salaires-CNPS-TREATMENT-V2/b5b64c2c-9488-4758-827c-669df046fba2/scratchpad/execute_test.py)",
+      "Bash(.venv/bin/python /private/tmp/claude-501/-Users-macbookair-Desktop-CAE-Salaires-CNPS-TREATMENT-V2/b5b64c2c-9488-4758-827c-669df046fba2/scratchpad/execute_notebook.py)",
+      "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('src/cnps/audit.py'\\).read\\(\\)\\); print\\('SYNTAX OK'\\)\")"
     ],
     "additionalDirectories": [
       "/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2"
