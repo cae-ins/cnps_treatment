@@ -500,54 +500,49 @@ def _check_couverture_declaration(
     hire_date_var: str = "DATE_EMBAUCHE",
 ) -> pl.DataFrame:
     """
-    12. Combien de mois de salaire manquent a un individu, sur TOUTE la
-    periode observee (les deux annees confondues, pas annee par annee).
+    12. Combien de personnes ont 1, 2, 3... mois de salaire manquant.
 
-    Repond a : « si je prends tel individu, sur combien de mois lui manque-t-il
-    un salaire ? » et « quel pourcentage d'individus ont 1, 2, 3... salaires
-    manquants ? ».
+    Tous les fichiers mensuels sont concatenes en un seul bloc, puis on
+    regarde chaque ``ID_INDIV`` sur l'ensemble de la periode : parmi les mois
+    ou il **aurait du** etre declare (ceux posterieurs a sa ``DATE_EMBAUCHE``),
+    combien n'ont pas de salaire renseigne.
 
-    Une ligne par nombre de mois manquants (0, 1, 2, ... N), avec l'effectif
-    et le pourcentage d'individus concernes, en simple et en cumule.
+    Resultat : une ligne par nombre de mois manquants, une colonne d'effectif.
+    Lecture directe, du type « 1 050 personnes ont 1 mois manquant, 2 040 en
+    ont 2 ». Filtrer sur ``nb_mois_manquants`` dans Excel donne le nombre de
+    personnes concernees.
 
-    Trois denominateurs sont calcules cote a cote, car ils ne racontent pas la
-    meme chose et le choix change radicalement les chiffres :
+    Regles de comptage :
 
-    - ``manquants_sur_periode`` : N mois observes moins ses mois declares.
-      Vue brute, tout le monde sur la meme echelle. Un individu embauche en
-      cours de periode y apparait avec beaucoup de manquants, y compris pour
-      les mois ou il n'etait pas encore salarie.
+    - Un salaire compte comme declare s'il est renseigne ET strictement
+      positif (une ligne a 0 ou negative n'est pas une declaration
+      exploitable).
+    - Seuls les mois **posterieurs a la date d'embauche** sont comptes : un
+      mois anterieur n'est pas un manque, l'individu n'avait pas a y etre
+      declare. ``DATE_EMBAUCHE`` est renseignee a 100% dans les fichiers
+      sources ; si la colonne est absente, on retombe sur l'ensemble des mois
+      observes (colonne ``base_de_comptage`` du resultat).
+    - Si plusieurs dates d'embauche coexistent pour un individu (plusieurs
+      employeurs), la plus ancienne definit le debut de sa vie salariee
+      observee.
+    - Les mois de la periode sont chaines d'une annee a l'autre : decembre
+      2024 et janvier 2025 sont consecutifs.
 
-    - ``manquants_depuis_embauche`` : ne compte que les mois **posterieurs a
-      sa DATE_EMBAUCHE**. C'est la mesure du vrai defaut de declaration :
-      un mois avant l'embauche n'est pas un manque, c'est un mois ou
-      l'individu n'avait pas a etre declare. Necessite ``hire_date_var``
-      (renseignee a 100% dans les fichiers sources) ; a defaut, la colonne
-      vaut null.
-
-    - ``manquants_entre_declarations`` : uniquement les trous **internes**,
-      entre la premiere et la derniere declaration de l'individu. Ce sont les
-      seuls trous que la regle backward/forward peut combler en interpolant
-      des deux cotes ; ce qui est avant la premiere ou apres la derniere
-      declaration ne peut etre que prolonge, pas interpole.
-
-    Un salaire compte comme declare s'il est renseigne ET strictement positif.
-
-    La ligne ou ``nb_mois_manquants`` egale ``nb_mois_observes`` regroupe les
-    individus qui n'ont jamais rien declare (cf. feuille Non_Declarants).
+    La derniere ligne (``nb_mois_manquants`` = nombre de mois eligibles)
+    regroupe les individus qui n'ont jamais rien declare : cf. la feuille
+    Non_Declarants pour leur decompte detaille.
     """
     schema_vide = {
-        "denominateur": pl.Utf8, "nb_mois_observes": pl.Int64,
-        "nb_mois_manquants": pl.Int64, "nb_individus_total": pl.Int64,
-        "nb_individus": pl.Int64, "pct_individus": pl.Float64,
-        "cum_individus": pl.Int64, "cum_pct_individus": pl.Float64,
+        "nb_mois_manquants": pl.Int64, "nb_personnes": pl.Int64,
+        "pct_personnes": pl.Float64, "cum_personnes": pl.Int64,
+        "cum_pct_personnes": pl.Float64, "base_de_comptage": pl.Utf8,
+        "nb_mois_periode": pl.Int64, "nb_personnes_total": pl.Int64,
     }
 
     colonnes = [c for c in (id_var, salary_var, type_var, hire_date_var) if c]
     df = _concat_periodes(data, colonnes)
     if df is None:
-        # Repli si DATE_EMBAUCHE (ou TYPE_SALARIE) absente : on perd la
-        # ventilation "depuis embauche" mais pas le reste.
+        # Repli : sans DATE_EMBAUCHE on compte sur toute la periode observee.
         df = _concat_periodes(data, [c for c in colonnes if c != hire_date_var])
         hire_date_var = ""
     if df is None:
@@ -563,19 +558,11 @@ def _check_couverture_declaration(
         (pl.col("_ANNEE") * 12 + pl.col("_MOIS")).alias("_T"),
     )
 
-    # Nombre de mois distincts reellement charges, toutes annees confondues
-    n_mois_observes = int(df.select(pl.col("_T").n_unique()).item())
+    n_mois_periode = int(df.select(pl.col("_T").n_unique()).item())
     t_min = int(df.select(pl.col("_T").min()).item())
 
-    agg = [
-        pl.col("_T").filter(pl.col("_DECLARE")).n_unique().alias("_n_declares"),
-        pl.col("_T").filter(pl.col("_DECLARE")).min().alias("_t_first"),
-        pl.col("_T").filter(pl.col("_DECLARE")).max().alias("_t_last"),
-    ]
+    agg = [pl.col("_T").filter(pl.col("_DECLARE")).n_unique().alias("_n_declares")]
     if hire_date_var:
-        # Mois d'embauche ramene sur la meme echelle _T. On prend le min :
-        # si plusieurs dates coexistent (plusieurs employeurs), la plus
-        # ancienne definit le debut de la vie salariee observee.
         agg.append(
             (
                 pl.col(hire_date_var).dt.year() * 12 + pl.col(hire_date_var).dt.month()
@@ -584,82 +571,51 @@ def _check_couverture_declaration(
 
     par_indiv = df.group_by(id_var).agg(agg)
 
-    # -- Denominateur 1 : sur toute la periode observee
-    par_indiv = par_indiv.with_columns(
-        (n_mois_observes - pl.col("_n_declares")).alias("manquants_sur_periode")
-    )
-
-    # -- Denominateur 2 : uniquement les mois posterieurs a l'embauche
     if hire_date_var:
-        # Une embauche anterieure au debut de l'historique => tous les mois
-        # observes sont eligibles ; une embauche posterieure a la fin en
-        # laisse zero (clip a [0, n_mois_observes]).
+        # Mois eligibles = ceux de la periode qui suivent l'embauche. Une
+        # embauche anterieure a l'historique rend tous les mois eligibles ;
+        # une embauche posterieure a la fin n'en laisse aucun.
         mois_eligibles = (
-            (pl.lit(n_mois_observes) - (pl.col("_t_embauche") - pl.lit(t_min)))
-            .clip(0, n_mois_observes)
+            (pl.lit(n_mois_periode) - (pl.col("_t_embauche") - pl.lit(t_min)))
+            .clip(0, n_mois_periode)
         )
-        par_indiv = par_indiv.with_columns(
-            (mois_eligibles - pl.col("_n_declares")).clip(0, None)
-            .alias("manquants_depuis_embauche")
-        )
+        base = "Mois posterieurs a la date d'embauche"
     else:
-        par_indiv = par_indiv.with_columns(
-            pl.lit(None, dtype=pl.Int64).alias("manquants_depuis_embauche")
-        )
+        mois_eligibles = pl.lit(n_mois_periode)
+        base = "Tous les mois de la periode (DATE_EMBAUCHE absente)"
 
-    # -- Denominateur 3 : trous internes entre premiere et derniere declaration
     par_indiv = par_indiv.with_columns(
-        pl.when(pl.col("_n_declares") > 0)
-        .then(pl.col("_t_last") - pl.col("_t_first") + 1 - pl.col("_n_declares"))
-        .otherwise(None)
-        .alias("manquants_entre_declarations")
+        (mois_eligibles - pl.col("_n_declares")).clip(0, None).alias("nb_mois_manquants")
     )
 
     n_total = par_indiv.height
-    colonnes_denominateur = [
-        ("Sur toute la periode observee", "manquants_sur_periode"),
-        ("Depuis la date d'embauche", "manquants_depuis_embauche"),
-        ("Trous entre declarations", "manquants_entre_declarations"),
-    ]
-
-    frames = []
-    for libelle, col in colonnes_denominateur:
-        sous = par_indiv.filter(pl.col(col).is_not_null())
-        if sous.height == 0:
-            continue
-        n_base = sous.height
-        dist = (
-            sous.group_by(col)
-            .agg(pl.len().alias("nb_individus"))
-            .rename({col: "nb_mois_manquants"})
-            .sort("nb_mois_manquants")
-            .with_columns(
-                pl.lit(libelle).alias("denominateur"),
-                pl.lit(n_mois_observes, dtype=pl.Int64).alias("nb_mois_observes"),
-                pl.lit(n_base, dtype=pl.Int64).alias("nb_individus_total"),
-            )
-        )
-        dist = dist.with_columns(
-            (pl.col("nb_individus") / n_base * 100).round(2).alias("pct_individus"),
-            pl.col("nb_individus").cum_sum().alias("cum_individus"),
-        ).with_columns(
-            (pl.col("cum_individus") / n_base * 100).round(2).alias("cum_pct_individus"),
-        )
-        frames.append(
-            dist.select(
-                "denominateur", "nb_mois_observes", "nb_mois_manquants",
-                "nb_individus_total", "nb_individus", "pct_individus",
-                "cum_individus", "cum_pct_individus",
-            )
-        )
-
-    if not frames:
+    if n_total == 0:
         return pl.DataFrame(schema=schema_vide)
 
-    return pl.concat(frames, how="vertical_relaxed").with_columns(
+    dist = (
+        par_indiv.group_by("nb_mois_manquants")
+        .agg(pl.len().alias("nb_personnes"))
+        .sort("nb_mois_manquants")
+    )
+    dist = dist.with_columns(
+        (pl.col("nb_personnes") / n_total * 100).round(2).alias("pct_personnes"),
+        pl.col("nb_personnes").cum_sum().alias("cum_personnes"),
+    ).with_columns(
+        (pl.col("cum_personnes") / n_total * 100).round(2).alias("cum_pct_personnes"),
+        pl.lit(base).alias("base_de_comptage"),
+        pl.lit(n_mois_periode, dtype=pl.Int64).alias("nb_mois_periode"),
+        pl.lit(n_total, dtype=pl.Int64).alias("nb_personnes_total"),
+    )
+
+    return dist.select(
         pl.col("nb_mois_manquants").cast(pl.Int64),
-        pl.col("nb_individus").cast(pl.Int64),
-        pl.col("cum_individus").cast(pl.Int64),
+        pl.col("nb_personnes").cast(pl.Int64),
+        "pct_personnes",
+        pl.col("cum_personnes").cast(pl.Int64),
+        "cum_pct_personnes",
+        "base_de_comptage",
+        "nb_mois_periode",
+        "nb_personnes_total",
     )
 
 
@@ -1219,31 +1175,23 @@ _GUIDE_LECTURE: list[tuple[str, str, str]] = [
     ),
     (
         "Couverture_Declaration",
-        "Repondre a : si je prends un individu, sur combien de mois lui "
-        "manque-t-il un salaire ? Une ligne par nombre de mois manquants "
-        "(0, 1, 2, ... N) avec l'effectif et le pourcentage d'individus "
-        "concernes, en simple et en cumule. Le calcul porte sur TOUTE la "
-        "periode observee d'un seul tenant (les deux annees confondues), pas "
-        "annee par annee. Un salaire compte comme declare s'il est renseigne "
-        "ET strictement positif.",
-        "La colonne 'denominateur' distingue trois lectures qui ne donnent PAS "
-        "les memes chiffres, a choisir selon la question posee. "
-        "(1) 'Sur toute la periode observee' : N mois moins les mois declares "
-        "— vue brute, mais un individu embauche en cours de periode y apparait "
-        "avec beaucoup de manquants pour des mois ou il n'etait pas encore "
-        "salarie. "
-        "(2) 'Depuis la date d'embauche' : ne compte que les mois posterieurs a "
-        "DATE_EMBAUCHE — c'est la mesure du vrai defaut de declaration, un mois "
-        "avant l'embauche n'etant pas un manque. C'est generalement la ligne a "
-        "privilegier. "
-        "(3) 'Trous entre declarations' : uniquement les trous internes, entre "
-        "la premiere et la derniere declaration — les seuls que la regle "
-        "backward/forward peut combler en interpolant des deux cotes, le reste "
-        "ne pouvant qu'etre prolonge. "
-        "Lire les colonnes cumulees pour obtenir directement le volume "
-        "d'individus 'au plus N mois manquants'. La ligne ou nb_mois_manquants "
-        "egale nb_mois_observes regroupe ceux qui n'ont jamais rien declare "
-        "(cf. feuille Non_Declarants).",
+        "Denombrer les personnes selon leur nombre de mois de salaire "
+        "manquant. Tous les fichiers mensuels sont concatenes en un seul bloc, "
+        "puis chaque ID_INDIV est examine sur toute la periode : parmi les "
+        "mois ou il aurait du etre declare (ceux posterieurs a sa "
+        "DATE_EMBAUCHE), combien n'ont pas de salaire renseigne. Une ligne par "
+        "nombre de mois manquants, une colonne d'effectif.",
+        "Lecture directe : filtrer sur nb_mois_manquants donne le nombre de "
+        "personnes concernees (ex. nb_mois_manquants = 1 -> nb_personnes = "
+        "combien de personnes n'ont qu'un seul mois manquant). Les colonnes "
+        "cumulees donnent le volume 'au plus N mois manquants'. "
+        "Deux points a savoir pour interpreter : un mois anterieur a "
+        "l'embauche n'est PAS compte comme manquant (l'individu n'avait pas a "
+        "y etre declare) — c'est ce que rappelle la colonne base_de_comptage ; "
+        "et un salaire ne compte comme declare que s'il est renseigne ET "
+        "strictement positif, une ligne a 0 n'etant pas une declaration "
+        "exploitable. La derniere ligne regroupe ceux qui n'ont jamais rien "
+        "declare (cf. feuille Non_Declarants).",
     ),
     (
         "Non_Declarants",
