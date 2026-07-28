@@ -718,6 +718,139 @@ def _check_non_declarants(
     return pl.DataFrame(rows, schema_overrides=schema_vide)
 
 
+def _check_declaration_entreprise(
+    data: list[tuple[str, int, int, pl.DataFrame]],
+    salary_var: str = "SALAIRE_BRUT",
+    id_var: str = "ID_INDIV",
+    type_var: str = "TYPE_SALARIE",
+    employer_var: str = "ID_EMPLOYEUR",
+    hire_date_var: str = "DATE_EMBAUCHE",
+) -> pl.DataFrame:
+    """
+    15. Nature de la non-declaration au niveau entreprise-mois : totale ou
+    partielle.
+
+    Question tranchee par ce controle : le pipeline doit-il suivre l'annexe 2
+    de la note methodologique (non-declaration **totale** de l'entreprise :
+    IPW entreprise-mois + imputation multiple du salaire moyen) ou l'annexe 3
+    (declaration **partielle**, qui ajoute un second etage individuel
+    ``pi_ijt = p_jt x q_ijt`` conditionnel a la declaration de l'entreprise) ?
+
+    Chaque couple (entreprise, mois) est classe en trois categories, d'apres
+    la part de ses salaries eligibles dont le salaire est renseigne :
+
+    - ``AUCUNE_DECLARATION`` : 0% des salaries ont un salaire. C'est le cas
+      R_jt = 0 de l'annexe 2 — l'entreprise n'a rien transmis ce mois-la.
+    - ``DECLARATION_PARTIELLE`` : entre 0% et 100% exclus. **Inexprimable dans
+      l'annexe 2** : l'entreprise a bien declare, mais en omettant une partie
+      de ses salaries. C'est le cas que l'annexe 3 traite explicitement.
+    - ``DECLARATION_COMPLETE`` : 100% des salaries eligibles ont un salaire.
+
+    Un salarie n'est compte comme eligible que si le mois suit sa
+    ``DATE_EMBAUCHE`` (meme regle que les controles 12 et 13) : un salarie pas
+    encore embauche n'est pas une omission de l'employeur. Les couples sans
+    aucun salarie eligible sont exclus du decompte.
+
+    Lecture : si ``DECLARATION_PARTIELLE`` est marginale, l'annexe 2 suffit.
+    Si elle represente une part importante des couples ou, surtout, des
+    salaries manquants (colonne ``nb_salaries_manquants``), alors traiter ces
+    manquants comme une absence totale de declaration revient a ignorer les
+    salaires reellement observes chez le meme employeur le meme mois, et
+    l'annexe 3 s'impose (cf. son paragraphe d'introduction : « ne pas tenir
+    compte de cette structure hierarchique [...] conduit a des biais »).
+
+    Note : ce controle mesure la declaration au niveau du SALAIRE renseigne,
+    ce qui est plus strict que l'indicateur ``D_JT`` de
+    ``05_base_entreprises.py`` — lequel vaut 1 des que l'entreprise apparait
+    dans le fichier, sans verifier qu'un salaire y figure.
+    """
+    schema_vide = {
+        "categorie": pl.Utf8, "nb_entreprise_mois": pl.Int64,
+        "pct_entreprise_mois": pl.Float64, "nb_salaries_eligibles": pl.Int64,
+        "nb_salaries_declares": pl.Int64, "nb_salaries_manquants": pl.Int64,
+        "pct_des_salaries_manquants": pl.Float64,
+        "taux_declaration_moyen_pct": pl.Float64,
+    }
+
+    colonnes = [c for c in (id_var, employer_var, salary_var, type_var, hire_date_var) if c]
+    df = _concat_periodes(data, colonnes)
+    if df is None:
+        df = _concat_periodes(data, [c for c in colonnes if c != hire_date_var])
+        hire_date_var = ""
+    if df is None:
+        df = _concat_periodes(data, [id_var, employer_var, salary_var])
+        type_var = ""
+    if df is None:
+        return pl.DataFrame(schema=schema_vide)
+
+    df = _ajouter_salaire_mensuel(df, salary_var, type_var)
+    df = df.filter(pl.col(employer_var).is_not_null())
+    if df.height == 0:
+        return pl.DataFrame(schema=schema_vide)
+
+    df = df.with_columns(
+        (pl.col("_SAL_MENS").is_not_null() & (pl.col("_SAL_MENS") > 0)).alias("_DECLARE"),
+        (pl.col("_ANNEE") * 12 + pl.col("_MOIS")).alias("_T"),
+    )
+
+    if hire_date_var:
+        df = df.filter(
+            (
+                pl.col("_T")
+                >= (pl.col(hire_date_var).dt.year() * 12 + pl.col(hire_date_var).dt.month())
+            ).fill_null(True)
+        )
+    if df.height == 0:
+        return pl.DataFrame(schema=schema_vide)
+
+    # Un couple (entreprise, mois) = une observation. On compte ses salaries
+    # eligibles et combien d'entre eux ont un salaire renseigne.
+    couples = df.group_by([employer_var, "_T"]).agg(
+        pl.len().alias("_n_eligibles"),
+        pl.col("_DECLARE").sum().alias("_n_declares"),
+    )
+    couples = couples.with_columns(
+        (pl.col("_n_eligibles") - pl.col("_n_declares")).alias("_n_manquants"),
+        (pl.col("_n_declares") / pl.col("_n_eligibles") * 100).alias("_taux"),
+    ).with_columns(
+        pl.when(pl.col("_n_declares") == 0)
+        .then(pl.lit("AUCUNE_DECLARATION"))
+        .when(pl.col("_n_declares") == pl.col("_n_eligibles"))
+        .then(pl.lit("DECLARATION_COMPLETE"))
+        .otherwise(pl.lit("DECLARATION_PARTIELLE"))
+        .alias("categorie")
+    )
+
+    n_couples = couples.height
+    n_manquants_total = int(couples["_n_manquants"].sum())
+
+    resume = (
+        couples.group_by("categorie")
+        .agg(
+            pl.len().alias("nb_entreprise_mois"),
+            pl.col("_n_eligibles").sum().alias("nb_salaries_eligibles"),
+            pl.col("_n_declares").sum().alias("nb_salaries_declares"),
+            pl.col("_n_manquants").sum().alias("nb_salaries_manquants"),
+            pl.col("_taux").mean().round(2).alias("taux_declaration_moyen_pct"),
+        )
+        .sort("categorie")
+    )
+
+    return resume.select(
+        "categorie",
+        pl.col("nb_entreprise_mois").cast(pl.Int64),
+        (pl.col("nb_entreprise_mois") / n_couples * 100).round(2).alias("pct_entreprise_mois"),
+        pl.col("nb_salaries_eligibles").cast(pl.Int64),
+        pl.col("nb_salaries_declares").cast(pl.Int64),
+        pl.col("nb_salaries_manquants").cast(pl.Int64),
+        (
+            pl.col("nb_salaries_manquants") / n_manquants_total * 100
+            if n_manquants_total else pl.lit(None, dtype=pl.Float64)
+        ).round(2).alias("pct_des_salaries_manquants"),
+        "taux_declaration_moyen_pct",
+    )
+
+
 def _check_changement_employeur(
     data: list[tuple[str, int, int, pl.DataFrame]],
     salary_var: str = "SALAIRE_BRUT",
@@ -1252,6 +1385,32 @@ _GUIDE_LECTURE: list[tuple[str, str, str]] = [
         "Le seuil de rupture (50%) est un repere de lecture : ce controle "
         "n'exclut aucune ligne des donnees.",
     ),
+    (
+        "Declaration_Entreprise",
+        "Classer chaque couple (entreprise, mois) selon la part de ses "
+        "salaries dont le salaire est renseigne : AUCUNE_DECLARATION (0%), "
+        "DECLARATION_PARTIELLE (entre 0 et 100% exclus) ou "
+        "DECLARATION_COMPLETE (100%). Un salarie n'est compte que si le mois "
+        "suit sa DATE_EMBAUCHE, comme dans les feuilles Couverture_Declaration "
+        "et Non_Declarants.",
+        "Cette feuille tranche le choix methodologique entre l'annexe 2 et "
+        "l'annexe 3 de la note de reference. L'annexe 2 suppose qu'une "
+        "entreprise declare tout ou rien (R_jt = 0 ou 1) : elle ne sait pas "
+        "representer une entreprise qui declare 31 salaries sur 52. "
+        "L'annexe 3 ajoute pour cela un second etage individuel "
+        "(pi_ijt = p_jt x q_ijt). "
+        "Lire en priorite la colonne pct_des_salaries_manquants sur la ligne "
+        "DECLARATION_PARTIELLE : elle dit quelle part des salaires manquants "
+        "se trouve dans des entreprises qui ont pourtant declare ce mois-la. "
+        "Si cette part est marginale, l'annexe 2 suffit. Si elle est "
+        "importante, les traiter comme une absence totale de declaration "
+        "revient a ignorer les salaires reellement observes chez le meme "
+        "employeur le meme mois, et a imputer un salaire moyen d'entreprise "
+        "que l'on pourrait mesurer directement — l'annexe 3 s'impose alors. "
+        "Attention : ce controle est plus strict que l'indicateur D_JT de "
+        "05_base_entreprises.py, qui vaut 1 des que l'entreprise apparait "
+        "dans le fichier sans verifier qu'un salaire y figure.",
+    ),
 ]
 
 
@@ -1434,6 +1593,7 @@ def _export_audit_excel(
     couverture_declaration: pl.DataFrame,
     non_declarants: pl.DataFrame,
     changement_employeur: pl.DataFrame,
+    declaration_entreprise: pl.DataFrame,
 ) -> None:
     """Ecrit tous les DataFrames d'audit dans un classeur Excel sur MinIO."""
     def _write(buf: io.BytesIO) -> None:
@@ -1472,6 +1632,7 @@ def _export_audit_excel(
             ("Couverture_Declaration", couverture_declaration),
             ("Non_Declarants", non_declarants),
             ("Changement_Employeur", changement_employeur),
+            ("Declaration_Entreprise", declaration_entreprise),
         ]
 
         _write_guide_lecture_sheet(wb, header_fmt, text_fmt)
@@ -1577,59 +1738,65 @@ def executer_audit(
 
     logger.info("Fichiers a auditer : {}", len(data))
 
-    logger.info("1/14 - Verification des doublons...")
+    logger.info("1/15 - Verification des doublons...")
     df_doublons = _check_doublons(data)
 
-    logger.info("2/14 - Verification des colonnes...")
+    logger.info("2/15 - Verification des colonnes...")
     df_colonnes = _check_colonnes(data)
 
-    logger.info("3/14 - Verification des types...")
+    logger.info("3/15 - Verification des types...")
     df_types = _check_types(data)
 
-    logger.info("4/14 - Verification des valeurs manquantes...")
+    logger.info("4/15 - Verification des valeurs manquantes...")
     df_missing = _check_valeurs_manquantes(data)
 
-    logger.info("5/14 - Detection des outliers ({}, par periodicite {})...", salary_var, type_var)
+    logger.info("5/15 - Detection des outliers ({}, par periodicite {})...", salary_var, type_var)
     df_outliers = _check_outliers(
         data, variable=salary_var, iqr_multiplier=iqr_multiplier, type_var=type_var
     )
 
-    logger.info("6/14 - Verification de l'unicite des ID ({})...", id_var)
+    logger.info("6/15 - Verification de l'unicite des ID ({})...", id_var)
     df_unicite = _check_unicite_id(data, id_var=id_var)
 
-    logger.info("7/14 - Top 5% des ID les plus dupliques ({})...", id_var)
+    logger.info("7/15 - Top 5% des ID les plus dupliques ({})...", id_var)
     df_top_dup = _check_top_doublons_id(data, id_var=id_var)
 
-    logger.info("8/14 - Matrice de transitions des ID ({})...", id_var)
+    logger.info("8/15 - Matrice de transitions des ID ({})...", id_var)
     df_transitions = _check_transitions(data, id_var=id_var)
 
-    logger.info("9/14 - Distribution des variables numeriques...")
+    logger.info("9/15 - Distribution des variables numeriques...")
     df_distribution = _check_distribution(data)
 
-    logger.info("10/14 - Valeurs manquantes selon presence de {}...", salary_var)
+    logger.info("10/15 - Valeurs manquantes selon presence de {}...", salary_var)
     df_manquants_vs_salaire = _check_manquants_vs_salaire(data, salary_var=salary_var)
 
-    logger.info("11/14 - Analyse du salaire par periodicite declaree ({})...", type_var)
+    logger.info("11/15 - Analyse du salaire par periodicite declaree ({})...", type_var)
     df_analyse_salaire = _check_analyse_salaire(
         data, salary_var=salary_var, type_var=type_var, smig_mensuel=cfg.cleaning.min_salary
     )
 
-    logger.info("12/14 - Mois de salaire manquants par individu (toute la periode)...")
+    logger.info("12/15 - Mois de salaire manquants par individu (toute la periode)...")
     df_couverture = _check_couverture_declaration(
         data, salary_var=salary_var, id_var=id_var, type_var=type_var,
         hire_date_var=hire_date_var,
     )
 
-    logger.info("13/14 - Individus sans aucune declaration de salaire...")
+    logger.info("13/15 - Individus sans aucune declaration de salaire...")
     df_non_declarants = _check_non_declarants(
         data, salary_var=salary_var, id_var=id_var, type_var=type_var,
         hire_date_var=hire_date_var,
     )
 
-    logger.info("14/14 - Variation de salaire lors d'un changement d'employeur...")
+    logger.info("14/15 - Variation de salaire lors d'un changement d'employeur...")
     df_changement_employeur = _check_changement_employeur(
         data, salary_var=salary_var, id_var=id_var, type_var=type_var,
         employer_var=employer_var,
+    )
+
+    logger.info("15/15 - Nature de la non-declaration entreprise-mois (totale/partielle)...")
+    df_declaration_entreprise = _check_declaration_entreprise(
+        data, salary_var=salary_var, id_var=id_var, type_var=type_var,
+        employer_var=employer_var, hire_date_var=hire_date_var,
     )
 
     logger.info("Export Excel...")
@@ -1643,6 +1810,7 @@ def executer_audit(
         couverture_declaration=df_couverture,
         non_declarants=df_non_declarants,
         changement_employeur=df_changement_employeur,
+        declaration_entreprise=df_declaration_entreprise,
     )
 
     logger.info("Fichier d'audit genere : {}", output_object)

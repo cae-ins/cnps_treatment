@@ -427,84 +427,41 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
                 "aucune conversion de periodicite possible)."
             )
 
-    # --- SALAIRE_BRUT_IMPUTE_INDIV : imputation par continuite individuelle ---
-    # Complementaire a l'imputation par entreprise de l'etape 08
-    # (08_imputation_salaires.py, modele log-lineaire au niveau entreprise-
-    # periode) : ici, on exploite le fait qu'un MEME individu (ID_INDIV) peut
-    # avoir des declarations renseignees a d'autres mois que celui ou son
-    # salaire manque (ex. fevrier manquant, janvier et mars renseignes).
+    # --- Pas d'imputation par continuite individuelle (retire volontairement) ---
     #
-    # Regle (backward/forward) appliquee sur SALAIRE_BRUT_ESTIME_AU_MOIS,
-    # trie chronologiquement par individu :
-    #   - Si un salaire renseigne existe AVANT et APRES le mois manquant :
-    #     moyenne des deux.
-    #   - Si seulement AVANT (backward / LOCF) : cette valeur.
-    #   - Si seulement APRES (forward / NOCB) : cette valeur.
-    #   - Si aucun des deux (l'individu n'a jamais de salaire renseigne sur
-    #     toute la periode observee) : reste manquant, non imputable ici.
+    # Une imputation backward/forward au niveau ID_INDIV
+    # (``SALAIRE_BRUT_IMPUTE_INDIV`` / ``FLAG_IMPUTE_INDIV``) a existe ici puis
+    # a ete retiree, pour rester conforme a la note methodologique de reference
+    # (« Estimation du salaire moyen national a partir de donnees incompletes »,
+    # annexe 2 « Declaration des salaires par l'employeur » et annexe 3
+    # « Declaration employeur partielle »).
     #
-    # Nouvelle colonne separee (ne modifie ni SALAIRE_BRUT, donnee source
-    # brute, ni SALAIRE_BRUT_ESTIME_AU_MOIS, deja une estimation de
-    # periodicite) + FLAG_IMPUTE_INDIV pour tracer precisement les lignes
-    # concernees (declare vs impute par continuite).
-    _cols_periode_impute = [c for c in ("PERIOD", "ANNEE", "MOIS") if c in df.columns]
-    if "ID_INDIV" in df.columns and _cols_periode_impute and "SALAIRE_BRUT_ESTIME_AU_MOIS" in df.columns:
-        n_manquant_avant = df["SALAIRE_BRUT_ESTIME_AU_MOIS"].null_count()
-
-        df = df.sort(["ID_INDIV", *_cols_periode_impute])
-        df = df.with_columns(
-            pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS")
-            .forward_fill()
-            .over("ID_INDIV")
-            .alias("_SALAIRE_BACKWARD"),
-            pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS")
-            .backward_fill()
-            .over("ID_INDIV")
-            .alias("_SALAIRE_FORWARD"),
-        )
-        df = df.with_columns(
-            pl.when(pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS").is_not_null())
-            .then(pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS"))
-            .when(pl.col("_SALAIRE_BACKWARD").is_not_null() & pl.col("_SALAIRE_FORWARD").is_not_null())
-            .then((pl.col("_SALAIRE_BACKWARD") + pl.col("_SALAIRE_FORWARD")) / 2)
-            .when(pl.col("_SALAIRE_BACKWARD").is_not_null())
-            .then(pl.col("_SALAIRE_BACKWARD"))
-            .when(pl.col("_SALAIRE_FORWARD").is_not_null())
-            .then(pl.col("_SALAIRE_FORWARD"))
-            .otherwise(None)
-            .alias("SALAIRE_BRUT_IMPUTE_INDIV"),
-            (
-                pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS").is_null()
-                & (pl.col("_SALAIRE_BACKWARD").is_not_null() | pl.col("_SALAIRE_FORWARD").is_not_null())
-            ).alias("FLAG_IMPUTE_INDIV"),
-        )
-        df = df.drop("_SALAIRE_BACKWARD", "_SALAIRE_FORWARD")
-
-        n_impute = df["FLAG_IMPUTE_INDIV"].sum()
-        n_manquant_apres = df["SALAIRE_BRUT_IMPUTE_INDIV"].null_count()
-        pct_complet_avant = (1 - n_manquant_avant / df.height) * 100 if df.height else 0.0
-        pct_complet_apres = (1 - n_manquant_apres / df.height) * 100 if df.height else 0.0
-        logger.info(
-            "SALAIRE_BRUT_IMPUTE_INDIV calcule (continuite par ID_INDIV, backward/forward, "
-            "moyenne si les deux disponibles) : {} salaires manquants au depart, {} impute(s) "
-            "par continuite individuelle, {} restent non imputables (aucune declaration de "
-            "l'individu sur toute la periode observee)",
-            n_manquant_avant, n_impute, n_manquant_apres,
-        )
-        logger.info(
-            "[TAUX DE COMPLETUDE DU SALAIRE] Avant imputation individuelle : {:.2f}% des lignes "
-            "renseignees ({}/{}). Apres imputation individuelle : {:.2f}% renseignees ({}/{}), "
-            "soit +{:.2f} points grace a SALAIRE_BRUT_IMPUTE_INDIV.",
-            pct_complet_avant, df.height - n_manquant_avant, df.height,
-            pct_complet_apres, df.height - n_manquant_apres, df.height,
-            pct_complet_apres - pct_complet_avant,
-        )
-    elif "SALAIRE_BRUT_ESTIME_AU_MOIS" in df.columns:
-        logger.info(
-            "SALAIRE_BRUT_IMPUTE_INDIV non calcule : ID_INDIV ou colonne de periode "
-            "(PERIOD/ANNEE+MOIS) absente."
-        )
-    _log_etape("Imputation par continuite individuelle (SALAIRE_BRUT_IMPUTE_INDIV)", df.height)
+    # Raison : dans les donnees administratives CNPS, l'unite declarante est
+    # l'ENTREPRISE, pas le salarie. Le manquant est donc structurellement situe
+    # au niveau entreprise-mois. Combler un trou individuel par report d'un
+    # autre mois du meme individu revient a mal specifier le mecanisme de
+    # non-reponse.
+    #
+    # Consequence technique, et c'est le point bloquant : la correction prevue
+    # repose sur un IPW qui repondere les DECLARANTS par l'inverse de leur
+    # probabilite de declarer (cf. 07_modele_declaration.py). Pre-remplir des
+    # manquants transforme des non-declarants en declarants aux yeux de ce
+    # modele : la probabilite p_jt est alors estimee sur une population
+    # artificiellement gonflee, les poids 1/p sont sous-estimes, et la
+    # correction du biais echoue silencieusement. S'y ajoute une double
+    # comptabilisation, l'entreprise concernee etant de toute facon imputee a
+    # l'etape 08.
+    #
+    # Constat empirique allant dans le meme sens (feuille Changement_Employeur
+    # de l'audit) : la variation mediane du salaire est de ~62% lors d'un
+    # changement d'employeur contre ~0,7% a employeur constant. Un report
+    # individuel traverse ces ruptures et transporte le salaire de l'ancien
+    # poste sur le nouveau.
+    #
+    # L'information de continuite individuelle reste exploitable, mais comme
+    # VARIABLE EXPLICATIVE du modele de declaration (historique et regularite
+    # de declaration de l'individu, cf. annexe 3, probabilite q_ijt), jamais
+    # comme valeur imputee en amont de l'IPW.
 
     if "DATE_NAISSANCE" in df.columns:
         df = df.with_columns(
