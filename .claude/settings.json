@@ -59,7 +59,10 @@
       "Bash(.venv/bin/python /private/tmp/claude-501/-Users-macbookair-Desktop-CAE-Salaires-CNPS-TREATMENT-V2/b5b64c2c-9488-4758-827c-669df046fba2/scratchpad/execute_notebook.py)",
       "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('src/cnps/audit.py'\\).read\\(\\)\\); print\\('SYNTAX OK'\\)\")",
       "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('src/cnps/03_nettoyage_donnees.py'\\).read\\(\\)\\); print\\('SYNTAX OK'\\)\")",
-      "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('src/cnps/orchestrator.py'\\).read\\(\\)\\); print\\('SYNTAX OK'\\)\")"
+      "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('src/cnps/orchestrator.py'\\).read\\(\\)\\); print\\('SYNTAX OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/cnps/03_nettoyage_donnees.py'\\).read\\(\\)\\)\")",
+      "Bash(python3 -c ' *)",
+      "Bash(.venv/bin/python /private/tmp/claude-501/-Users-macbookair-Desktop-CAE-Salaires-CNPS-TREATMENT-V2/a004a9f3-8b94-4624-b7bf-9e1f2456815e/scratchpad/test_checks.py)"
     ],
     "additionalDirectories": [
       "/Users/macbookair/Desktop/CAE/Salaires/CNPS_TREATMENT_V2"

@@ -430,6 +430,349 @@ def _check_analyse_salaire(
     return pl.DataFrame(rows)
 
 
+# ---------------------------------------------------------------------------
+# Controles de couverture de declaration par individu (12, 13, 14)
+#
+# Ces trois controles raisonnent sur la serie temporelle d'un individu
+# (``id_var``) et non plus fichier par fichier : ils concatenent donc d'abord
+# tous les mois charges. Objectif : savoir, AVANT toute imputation
+# (backward/forward de l'etape 03 ou modele de l'etape 08), combien
+# d'individus sont concernes et par quel profil de manque, pour pouvoir
+# trancher les cas au cas par cas plutot qu'en bloc.
+# ---------------------------------------------------------------------------
+
+def _concat_periodes(
+    data: list[tuple[str, int, int, pl.DataFrame]],
+    colonnes: list[str],
+) -> pl.DataFrame | None:
+    """
+    Empile tous les mois charges en une seule table, restreinte a ``colonnes``.
+
+    Retourne ``None`` si une colonne indispensable manque partout : les
+    controles appelants ecrivent alors une feuille vide plutot que d'echouer.
+    """
+    frames = []
+    for fname, mois, annee, df in data:
+        manquantes = [c for c in colonnes if c not in df.columns]
+        if manquantes:
+            continue
+        frames.append(
+            df.select(colonnes).with_columns(
+                pl.lit(fname).alias("_fichier"),
+                pl.lit(mois, dtype=pl.Int64).alias("_MOIS"),
+                pl.lit(annee, dtype=pl.Int64).alias("_ANNEE"),
+            )
+        )
+    if not frames:
+        return None
+    return pl.concat(frames, how="vertical_relaxed")
+
+
+def _ajouter_salaire_mensuel(
+    df: pl.DataFrame, salary_var: str, type_var: str
+) -> pl.DataFrame:
+    """
+    Ajoute ``_SAL_MENS`` : le salaire ramene a une base mensuelle selon la
+    periodicite declaree, pour que les montants soient comparables d'un
+    individu a l'autre.
+
+    Memes conventions que ``_check_analyse_salaire`` et l'etape 03
+    (``SALAIRE_BRUT_ESTIME_AU_MOIS``) : J -> x26, H -> x208, M ou non
+    renseigne -> inchange.
+    """
+    if type_var not in df.columns:
+        return df.with_columns(pl.col(salary_var).alias("_SAL_MENS"))
+    return df.with_columns(
+        pl.when(pl.col(type_var) == "J")
+        .then(pl.col(salary_var) * _JOURS_OUVRES_PAR_MOIS)
+        .when(pl.col(type_var) == "H")
+        .then(pl.col(salary_var) * _HEURES_PAR_MOIS)
+        .otherwise(pl.col(salary_var))
+        .alias("_SAL_MENS")
+    )
+
+
+def _check_couverture_declaration(
+    data: list[tuple[str, int, int, pl.DataFrame]],
+    salary_var: str = "SALAIRE_BRUT",
+    id_var: str = "ID_INDIV",
+    type_var: str = "TYPE_SALARIE",
+) -> pl.DataFrame:
+    """
+    12. Distribution du nombre de mois avec salaire declare, par individu et
+    par annee.
+
+    Pour chaque annee, compte combien d'individus ont un salaire declare sur
+    exactement 0, 1, 2, ... N mois (N = nombre de mois reellement disponibles
+    dans les fichiers charges pour cette annee, qui n'est pas forcement 12).
+
+    Un salaire est compte comme "declare" s'il est renseigne ET strictement
+    positif : une ligne a 0 ou negative n'est pas une declaration exploitable.
+
+    La colonne ``nb_mois_disponibles`` rappelle le denominateur de l'annee :
+    une couverture de 11/11 est complete pour une annee partiellement
+    chargee, et ne doit pas etre lue comme une declaration incomplete.
+    """
+    colonnes = [c for c in (id_var, salary_var, type_var) if c]
+    df = _concat_periodes(data, [c for c in colonnes if c != type_var])
+    if df is None:
+        return pl.DataFrame(schema={
+            "ANNEE": pl.Int64, "nb_mois_disponibles": pl.Int64,
+            "nb_mois_declares": pl.Int64, "nb_individus": pl.Int64,
+            "pct_individus": pl.Float64, "cum_individus": pl.Int64,
+            "cum_pct_individus": pl.Float64,
+        })
+
+    df_full = _concat_periodes(data, colonnes)
+    df = df_full if df_full is not None else df
+    df = _ajouter_salaire_mensuel(df, salary_var, type_var)
+
+    df = df.with_columns(
+        (pl.col("_SAL_MENS").is_not_null() & (pl.col("_SAL_MENS") > 0)).alias("_DECLARE")
+    )
+
+    # Nombre de mois distincts reellement charges pour chaque annee
+    mois_dispo = df.group_by("_ANNEE").agg(
+        pl.col("_MOIS").n_unique().alias("nb_mois_disponibles")
+    )
+
+    par_indiv = (
+        df.group_by(["_ANNEE", id_var])
+        .agg(
+            pl.col("_MOIS").filter(pl.col("_DECLARE")).n_unique().alias("nb_mois_declares"),
+        )
+    )
+
+    dist = (
+        par_indiv.group_by(["_ANNEE", "nb_mois_declares"])
+        .agg(pl.len().alias("nb_individus"))
+        .join(
+            par_indiv.group_by("_ANNEE").agg(pl.len().alias("_total_indiv")),
+            on="_ANNEE",
+            how="left",
+        )
+        .join(mois_dispo, on="_ANNEE", how="left")
+        .sort(["_ANNEE", "nb_mois_declares"])
+    )
+
+    dist = dist.with_columns(
+        (pl.col("nb_individus") / pl.col("_total_indiv") * 100).round(2).alias("pct_individus"),
+        pl.col("nb_individus").cum_sum().over("_ANNEE").alias("cum_individus"),
+    ).with_columns(
+        (pl.col("cum_individus") / pl.col("_total_indiv") * 100).round(2).alias("cum_pct_individus"),
+    )
+
+    return dist.select(
+        pl.col("_ANNEE").alias("ANNEE"),
+        "nb_mois_disponibles",
+        "nb_mois_declares",
+        pl.col("_total_indiv").alias("nb_individus_annee"),
+        "nb_individus",
+        "pct_individus",
+        "cum_individus",
+        "cum_pct_individus",
+    )
+
+
+def _check_non_declarants(
+    data: list[tuple[str, int, int, pl.DataFrame]],
+    salary_var: str = "SALAIRE_BRUT",
+    id_var: str = "ID_INDIV",
+    type_var: str = "TYPE_SALARIE",
+) -> pl.DataFrame:
+    """
+    13. Individus presents dans les fichiers mais sans aucun salaire declare.
+
+    Deux niveaux de lecture, empiles dans la meme feuille via la colonne
+    ``perimetre`` :
+
+    - une ligne par annee : individus presents cette annee-la sans jamais de
+      salaire declare sur l'annee ;
+    - une ligne ``TOUTES_PERIODES`` : individus sans aucun salaire declare sur
+      l'ensemble des mois charges. Ce sont les seuls veritablement
+      **non imputables par continuite individuelle** (backward/forward de
+      l'etape 03) : aucune valeur du meme individu n'existe nulle part pour
+      servir de base. Ils relevent de l'imputation au niveau entreprise
+      (etape 08) ou d'un traitement dedie.
+    """
+    colonnes = [c for c in (id_var, salary_var, type_var) if c]
+    df = _concat_periodes(data, colonnes)
+    if df is None:
+        df = _concat_periodes(data, [id_var, salary_var])
+    if df is None:
+        return pl.DataFrame(schema={
+            "perimetre": pl.Utf8, "nb_individus_presents": pl.Int64,
+            "nb_jamais_declarant": pl.Int64, "pct_jamais_declarant": pl.Float64,
+            "nb_au_moins_une_declaration": pl.Int64,
+        })
+
+    df = _ajouter_salaire_mensuel(df, salary_var, type_var)
+    df = df.with_columns(
+        (pl.col("_SAL_MENS").is_not_null() & (pl.col("_SAL_MENS") > 0)).alias("_DECLARE")
+    )
+
+    rows = []
+
+    par_annee = (
+        df.group_by(["_ANNEE", id_var])
+        .agg(pl.col("_DECLARE").any().alias("_a_declare"))
+        .group_by("_ANNEE")
+        .agg(
+            pl.len().alias("nb_individus_presents"),
+            (~pl.col("_a_declare")).sum().alias("nb_jamais_declarant"),
+        )
+        .sort("_ANNEE")
+    )
+    for r in par_annee.iter_rows(named=True):
+        n_tot = r["nb_individus_presents"]
+        n_jamais = r["nb_jamais_declarant"]
+        rows.append({
+            "perimetre": str(r["_ANNEE"]),
+            "nb_individus_presents": n_tot,
+            "nb_jamais_declarant": n_jamais,
+            "pct_jamais_declarant": round(n_jamais / n_tot * 100, 2) if n_tot else None,
+            "nb_au_moins_une_declaration": n_tot - n_jamais,
+        })
+
+    global_ = (
+        df.group_by(id_var)
+        .agg(pl.col("_DECLARE").any().alias("_a_declare"))
+    )
+    n_tot = global_.height
+    n_jamais = int(global_.filter(~pl.col("_a_declare")).height)
+    rows.append({
+        "perimetre": "TOUTES_PERIODES",
+        "nb_individus_presents": n_tot,
+        "nb_jamais_declarant": n_jamais,
+        "pct_jamais_declarant": round(n_jamais / n_tot * 100, 2) if n_tot else None,
+        "nb_au_moins_une_declaration": n_tot - n_jamais,
+    })
+
+    return pl.DataFrame(rows)
+
+
+def _check_changement_employeur(
+    data: list[tuple[str, int, int, pl.DataFrame]],
+    salary_var: str = "SALAIRE_BRUT",
+    id_var: str = "ID_INDIV",
+    type_var: str = "TYPE_SALARIE",
+    employer_var: str = "ID_EMPLOYEUR",
+    seuil_rupture_pct: float = 50.0,
+) -> pl.DataFrame:
+    """
+    14. Ampleur de la variation de salaire lors d'un changement d'employeur.
+
+    Reconstitue la serie chronologique de chaque individu (un salaire median
+    par individu/mois/employeur, ce qui aplatit les doublons intra-mois), puis
+    compare chaque observation a la precedente du meme individu.
+
+    Chaque transition est classee selon que l'employeur a change ou non, ce
+    qui donne la comparaison utile : une variation de salaire forte est
+    attendue lors d'un changement d'employeur, mais suspecte a employeur
+    constant. Les deux lignes de la feuille se lisent donc l'une par rapport
+    a l'autre, pas dans l'absolu.
+
+    ``seuil_rupture_pct`` (50 % par defaut) definit ce qui est compte comme
+    une rupture salariale : c'est un repere de lecture, pas un filtre — aucune
+    ligne n'est exclue des donnees par ce controle.
+
+    Enjeu pour l'imputation : si un changement d'employeur s'accompagne
+    typiquement d'un saut important, alors reporter le salaire d'avant sur un
+    mois manquant d'apres (backward/forward) transporte le salaire de
+    l'ancien poste — la continuite individuelle n'est legitime qu'a employeur
+    constant.
+    """
+    schema_vide = {
+        "changement_employeur": pl.Utf8, "nb_transitions": pl.Int64,
+        "nb_individus_concernes": pl.Int64, "variation_mediane_pct": pl.Float64,
+        "variation_abs_mediane_pct": pl.Float64, "p25_variation_pct": pl.Float64,
+        "p75_variation_pct": pl.Float64, "p90_variation_abs_pct": pl.Float64,
+        "pct_salaire_stable": pl.Float64, "pct_rupture": pl.Float64,
+        "pct_hausse": pl.Float64, "pct_baisse": pl.Float64,
+        "pct_hausse_sup_100pct": pl.Float64, "pct_baisse_sup_50pct": pl.Float64,
+    }
+
+    colonnes = [c for c in (id_var, employer_var, salary_var, type_var) if c]
+    df = _concat_periodes(data, colonnes)
+    if df is None:
+        df = _concat_periodes(data, [id_var, employer_var, salary_var])
+    if df is None:
+        return pl.DataFrame(schema=schema_vide)
+
+    df = _ajouter_salaire_mensuel(df, salary_var, type_var)
+    df = df.filter(
+        pl.col("_SAL_MENS").is_not_null()
+        & (pl.col("_SAL_MENS") > 0)
+        & pl.col(employer_var).is_not_null()
+        & pl.col(id_var).is_not_null()
+    )
+    if df.height == 0:
+        return pl.DataFrame(schema=schema_vide)
+
+    # Un point par individu/mois/employeur : la mediane neutralise les
+    # doublons intra-mois sans privilegier un montant extreme.
+    serie = (
+        df.group_by([id_var, "_ANNEE", "_MOIS", employer_var])
+        .agg(pl.col("_SAL_MENS").median().alias("_SAL"))
+        .with_columns((pl.col("_ANNEE") * 12 + pl.col("_MOIS")).alias("_T"))
+        .sort([id_var, "_T"])
+    )
+
+    serie = serie.with_columns(
+        pl.col(employer_var).shift(1).over(id_var).alias("_EMP_PREC"),
+        pl.col("_SAL").shift(1).over(id_var).alias("_SAL_PREC"),
+    )
+
+    transitions = serie.filter(
+        pl.col("_EMP_PREC").is_not_null() & (pl.col("_SAL_PREC") > 0)
+    ).with_columns(
+        (pl.col(employer_var) != pl.col("_EMP_PREC")).alias("_CHANGEMENT"),
+        ((pl.col("_SAL") - pl.col("_SAL_PREC")) / pl.col("_SAL_PREC") * 100).alias("_VAR_PCT"),
+    )
+    if transitions.height == 0:
+        return pl.DataFrame(schema=schema_vide)
+
+    resume = (
+        transitions.group_by("_CHANGEMENT")
+        .agg(
+            pl.len().alias("nb_transitions"),
+            pl.col(id_var).n_unique().alias("nb_individus_concernes"),
+            pl.col("_VAR_PCT").median().round(2).alias("variation_mediane_pct"),
+            pl.col("_VAR_PCT").abs().median().round(2).alias("variation_abs_mediane_pct"),
+            pl.col("_VAR_PCT").quantile(0.25).round(2).alias("p25_variation_pct"),
+            pl.col("_VAR_PCT").quantile(0.75).round(2).alias("p75_variation_pct"),
+            pl.col("_VAR_PCT").abs().quantile(0.90).round(2).alias("p90_variation_abs_pct"),
+            (pl.col("_VAR_PCT").abs() < 1).mean().alias("_stable"),
+            (pl.col("_VAR_PCT").abs() > seuil_rupture_pct).mean().alias("_rupture"),
+            (pl.col("_VAR_PCT") > 0).mean().alias("_hausse"),
+            (pl.col("_VAR_PCT") < 0).mean().alias("_baisse"),
+            (pl.col("_VAR_PCT") > 100).mean().alias("_hausse_100"),
+            (pl.col("_VAR_PCT") < -50).mean().alias("_baisse_50"),
+        )
+        .sort("_CHANGEMENT")
+    )
+
+    return resume.select(
+        pl.when(pl.col("_CHANGEMENT"))
+        .then(pl.lit("OUI - changement d'employeur"))
+        .otherwise(pl.lit("NON - meme employeur"))
+        .alias("changement_employeur"),
+        "nb_transitions",
+        "nb_individus_concernes",
+        "variation_mediane_pct",
+        "variation_abs_mediane_pct",
+        "p25_variation_pct",
+        "p75_variation_pct",
+        "p90_variation_abs_pct",
+        (pl.col("_stable") * 100).round(2).alias("pct_salaire_stable"),
+        (pl.col("_rupture") * 100).round(2).alias("pct_rupture"),
+        (pl.col("_hausse") * 100).round(2).alias("pct_hausse"),
+        (pl.col("_baisse") * 100).round(2).alias("pct_baisse"),
+        (pl.col("_hausse_100") * 100).round(2).alias("pct_hausse_sup_100pct"),
+        (pl.col("_baisse_50") * 100).round(2).alias("pct_baisse_sup_50pct"),
+    )
+
+
 def _check_outliers(data: list[tuple[str, int, int, pl.DataFrame]],
                     variable: str = "SALAIRE_BRUT",
                     iqr_multiplier: float = 1.5,
@@ -785,6 +1128,54 @@ _GUIDE_LECTURE: list[tuple[str, str, str]] = [
         "fine (par secteur, taille d'entreprise, concentration par employeur "
         "ou individu), voir le notebook analyse_incoherences_salaires.ipynb.",
     ),
+    (
+        "Couverture_Declaration",
+        "Compter, pour chaque annee, combien d'individus ont un salaire declare "
+        "sur exactement 0, 1, 2, ... N mois (N = colonne nb_mois_disponibles, "
+        "soit le nombre de mois reellement charges pour cette annee, pas "
+        "forcement 12). Un salaire compte comme declare s'il est renseigne ET "
+        "strictement positif.",
+        "C'est le cadrage a lire AVANT toute imputation : il dit combien "
+        "d'individus relevent d'un manque ponctuel (1 ou 2 mois absents, que la "
+        "regle backward/forward comblera de façon plausible) et combien "
+        "relevent d'un manque massif (declares 1 seul mois sur 12), pour "
+        "lesquels reporter une valeur unique sur onze mois revient a inventer "
+        "la quasi-totalite de la trajectoire. Lire nb_mois_disponibles avant de "
+        "conclure : une couverture 11/11 est complete pour une annee chargee "
+        "sur 11 mois. Les colonnes cumulees donnent directement le volume "
+        "d'individus 'au plus N mois declares'.",
+    ),
+    (
+        "Non_Declarants",
+        "Denombrer les individus presents dans les fichiers mais sans aucun "
+        "salaire declare : une ligne par annee, plus une ligne "
+        "TOUTES_PERIODES sur l'ensemble des mois charges.",
+        "La ligne TOUTES_PERIODES isole les individus reellement non imputables "
+        "par continuite individuelle : aucune valeur du meme individu n'existe "
+        "nulle part pour servir de base a un report backward/forward. Ils "
+        "relevent de l'imputation au niveau entreprise (etape 08) ou d'un "
+        "traitement dedie. Un individu jamais declarant une annee mais "
+        "declarant l'autre reste, lui, imputable a partir de l'autre annee : "
+        "c'est pourquoi les lignes annuelles et la ligne TOUTES_PERIODES ne "
+        "donnent pas le meme decompte, et que seule la seconde mesure "
+        "l'impasse d'imputation.",
+    ),
+    (
+        "Changement_Employeur",
+        "Comparer l'ampleur de la variation de salaire d'un mois au suivant "
+        "selon que l'individu a change d'employeur ou non. Une ligne pour les "
+        "transitions a employeur constant, une pour les changements "
+        "d'employeur, avec mediane, quartiles et part de ruptures fortes.",
+        "Les deux lignes se lisent l'une par rapport a l'autre, jamais dans "
+        "l'absolu : une variation forte est attendue lors d'un changement "
+        "d'employeur, mais suspecte a employeur constant. Enjeu direct pour "
+        "l'imputation : si les changements d'employeur s'accompagnent "
+        "typiquement d'un saut important, alors reporter le salaire d'avant "
+        "sur un mois manquant d'apres transporte le salaire de l'ancien poste "
+        "— la continuite individuelle n'est legitime qu'a employeur constant. "
+        "Le seuil de rupture (50%) est un repere de lecture : ce controle "
+        "n'exclut aucune ligne des donnees.",
+    ),
 ]
 
 
@@ -964,6 +1355,9 @@ def _export_audit_excel(
     distribution: pl.DataFrame,
     manquants_vs_salaire: pl.DataFrame,
     analyse_salaire: pl.DataFrame,
+    couverture_declaration: pl.DataFrame,
+    non_declarants: pl.DataFrame,
+    changement_employeur: pl.DataFrame,
 ) -> None:
     """Ecrit tous les DataFrames d'audit dans un classeur Excel sur MinIO."""
     def _write(buf: io.BytesIO) -> None:
@@ -999,6 +1393,9 @@ def _export_audit_excel(
             ("Distribution", distribution),
             ("Manquants_vs_Salaire", manquants_vs_salaire),
             ("Analyse_Salaire", analyse_salaire),
+            ("Couverture_Declaration", couverture_declaration),
+            ("Non_Declarants", non_declarants),
+            ("Changement_Employeur", changement_employeur),
         ]
 
         _write_guide_lecture_sheet(wb, header_fmt, text_fmt)
@@ -1029,6 +1426,7 @@ def executer_audit(
     salary_var: str = "SALAIRE_BRUT",
     id_var: str = "ID_INDIV",
     type_var: str = "TYPE_SALARIE",
+    employer_var: str = "ID_EMPLOYEUR",
     iqr_multiplier: float = 1.5,
     _load_fn=_load_files,
 ) -> str:
@@ -1058,6 +1456,9 @@ def executer_audit(
     type_var : str
         Colonne de periodicite du salaire (M/J/H), utilisee pour ventiler
         Outliers_Salaire et Analyse_Salaire par periodicite.
+    employer_var : str
+        Colonne identifiant l'employeur, utilisee par Changement_Employeur
+        pour distinguer une transition a employeur constant d'un changement.
     iqr_multiplier : float
         Multiplicateur IQR pour les bornes de valeurs extremes (1.5 par defaut).
     _load_fn : callable, optional
@@ -1096,41 +1497,57 @@ def executer_audit(
 
     logger.info("Fichiers a auditer : {}", len(data))
 
-    logger.info("1/11 - Verification des doublons...")
+    logger.info("1/14 - Verification des doublons...")
     df_doublons = _check_doublons(data)
 
-    logger.info("2/11 - Verification des colonnes...")
+    logger.info("2/14 - Verification des colonnes...")
     df_colonnes = _check_colonnes(data)
 
-    logger.info("3/11 - Verification des types...")
+    logger.info("3/14 - Verification des types...")
     df_types = _check_types(data)
 
-    logger.info("4/11 - Verification des valeurs manquantes...")
+    logger.info("4/14 - Verification des valeurs manquantes...")
     df_missing = _check_valeurs_manquantes(data)
 
-    logger.info("5/11 - Detection des outliers ({}, par periodicite {})...", salary_var, type_var)
+    logger.info("5/14 - Detection des outliers ({}, par periodicite {})...", salary_var, type_var)
     df_outliers = _check_outliers(
         data, variable=salary_var, iqr_multiplier=iqr_multiplier, type_var=type_var
     )
 
-    logger.info("6/11 - Verification de l'unicite des ID ({})...", id_var)
+    logger.info("6/14 - Verification de l'unicite des ID ({})...", id_var)
     df_unicite = _check_unicite_id(data, id_var=id_var)
 
-    logger.info("7/11 - Top 5% des ID les plus dupliques ({})...", id_var)
+    logger.info("7/14 - Top 5% des ID les plus dupliques ({})...", id_var)
     df_top_dup = _check_top_doublons_id(data, id_var=id_var)
 
-    logger.info("8/11 - Matrice de transitions des ID ({})...", id_var)
+    logger.info("8/14 - Matrice de transitions des ID ({})...", id_var)
     df_transitions = _check_transitions(data, id_var=id_var)
 
-    logger.info("9/11 - Distribution des variables numeriques...")
+    logger.info("9/14 - Distribution des variables numeriques...")
     df_distribution = _check_distribution(data)
 
-    logger.info("10/11 - Valeurs manquantes selon presence de {}...", salary_var)
+    logger.info("10/14 - Valeurs manquantes selon presence de {}...", salary_var)
     df_manquants_vs_salaire = _check_manquants_vs_salaire(data, salary_var=salary_var)
 
-    logger.info("11/11 - Analyse du salaire par periodicite declaree ({})...", type_var)
+    logger.info("11/14 - Analyse du salaire par periodicite declaree ({})...", type_var)
     df_analyse_salaire = _check_analyse_salaire(
         data, salary_var=salary_var, type_var=type_var, smig_mensuel=cfg.cleaning.min_salary
+    )
+
+    logger.info("12/14 - Couverture de declaration par individu et par annee...")
+    df_couverture = _check_couverture_declaration(
+        data, salary_var=salary_var, id_var=id_var, type_var=type_var
+    )
+
+    logger.info("13/14 - Individus sans aucune declaration de salaire...")
+    df_non_declarants = _check_non_declarants(
+        data, salary_var=salary_var, id_var=id_var, type_var=type_var
+    )
+
+    logger.info("14/14 - Variation de salaire lors d'un changement d'employeur...")
+    df_changement_employeur = _check_changement_employeur(
+        data, salary_var=salary_var, id_var=id_var, type_var=type_var,
+        employer_var=employer_var,
     )
 
     logger.info("Export Excel...")
@@ -1141,6 +1558,9 @@ def executer_audit(
         unicite_id=df_unicite, top_doublons_id=df_top_dup, transitions=df_transitions,
         distribution=df_distribution, manquants_vs_salaire=df_manquants_vs_salaire,
         analyse_salaire=df_analyse_salaire,
+        couverture_declaration=df_couverture,
+        non_declarants=df_non_declarants,
+        changement_employeur=df_changement_employeur,
     )
 
     logger.info("Fichier d'audit genere : {}", output_object)
