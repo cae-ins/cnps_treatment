@@ -93,12 +93,18 @@ _FIRM_SIZE_REDUCED = [
     (201, 1_000_000, "Grande (201+)"),
 ]
 
+# Conventions de conversion journalier/horaire -> mensuel pour
+# SALAIRE_BRUT_ESTIME_AU_MOIS (memes hypotheses que audit.py::_check_analyse_salaire
+# et le notebook analyse_incoherences_salaires.ipynb, a garder alignees si modifiees).
+_JOURS_OUVRES_PAR_MOIS = 26
+_HEURES_PAR_MOIS = 208  # 26 jours x 8h
+
 
 # ---------------------------------------------------------------------------
 # API publique
 # ---------------------------------------------------------------------------
 
-def nettoyer_donnees(cfg: PipelineConfig) -> str:
+def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False) -> str:
     """
     Nettoie et enrichit le jeu de donnees concatene.
 
@@ -108,9 +114,11 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
     2. Regles metier : doublons (lignes strictement identiques + colonne TAG),
        doublons ID_INDIV+ID_EMPLOYEUR+mois (meme employeur, salaire le plus
        eleve conserve ; les cumuls d'emplois chez des employeurs differents
-       ne sont pas touches), types d'employes exclus, salaire minimum
-       (negatifs/nuls/sous-seuil, cf. commentaire au point d'exclusion)
-    3. Calcul des variables derivees (ages, anciennete, classes)
+       ne sont pas touches), types d'employes exclus OU estimation mensuelle
+       (cf. ``include_hj_estimated``), salaire minimum (negatifs/nuls/sous-seuil,
+       cf. commentaire au point d'exclusion)
+    3. Calcul des variables derivees (ages, anciennete, classes,
+       SALAIRE_BRUT_ESTIME_AU_MOIS)
     4. Winsorisation des valeurs extremes de salaire
     5. Ecriture du Parquet nettoye
 
@@ -118,12 +126,27 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
     ----------
     cfg : PipelineConfig
         Configuration du pipeline.
+    include_hj_estimated : bool, optional
+        Si False (defaut) : comportement historique, les types d'employes de
+        ``cfg.cleaning.exclude_employee_types`` (typiquement ``["H", "J"]``,
+        journaliers/horaires) sont retires du jeu de donnees nettoye.
+        Si True : ces types sont CONSERVES, et ``SALAIRE_BRUT_ESTIME_AU_MOIS``
+        (cf. section 3) leur applique une estimation mensuelle a partir du
+        taux journalier/horaire declare, au lieu de les exclure. Le parametre
+        YAML ``cleaning.exclude_employee_types`` n'est pas modifie par ce
+        flag : il s'agit d'un choix ponctuel pour l'execution en cours,
+        pas d'un changement de configuration persistant.
 
     Returns
     -------
     str
         Nom de l'objet Parquet nettoye sur MinIO.
     """
+    logger.info("Mode journaliers/horaires : {}",
+                "CONSERVES avec estimation mensuelle (SALAIRE_BRUT_ESTIME_AU_MOIS)"
+                if include_hj_estimated else
+                f"EXCLUS ({cfg.cleaning.exclude_employee_types}, comportement par defaut)")
+
     processed_bucket = cfg.minio.processed_bucket
     all_objects = list_objects(cfg.minio, processed_bucket, cfg.minio.processed_prefix, recursive=False)
     files = sorted(obj for obj in all_objects if re.search(r"\.parquet$", obj))
@@ -134,7 +157,8 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
         )
 
     # --- 1. Concatenation ---
-    logger.info("Concatenation de {} fichiers mensuels", len(files))
+    logger.info("[1. Concatenation] Lecture de {} fichiers mensuels depuis {}/{}",
+                len(files), processed_bucket, cfg.minio.processed_prefix)
     frames = [read_parquet(cfg.minio, processed_bucket, f) for f in files]
 
     # Aligne les schemas (union des colonnes)
@@ -147,13 +171,40 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
         aligned.append(f.select(list(all_cols.keys())))
 
     df = pl.concat(aligned, how="vertical")
-    logger.info("Concatene : {} lignes, {} colonnes", df.height, df.width)
+    logger.info("[1. Concatenation] Termine : {} lignes, {} colonnes ({} colonnes uniques sur l'ensemble des fichiers)",
+                df.height, df.width, len(all_cols))
+
+    # --- Suivi du volume cumule ---
+    # n_brut est le denominateur fixe (volume brut concatene, avant tout
+    # filtre) utilise pour TOUS les "% du brut conserve" ci-dessous -- a ne
+    # pas confondre avec le "% retire" de chaque log de filtre, qui lui est
+    # relatif au volume ENTRANT dans ce filtre precis (cf. TRAITEMENT_MANOUAN.md,
+    # point 8, pour la distinction). _log_etape() logue les deux a chaque etape.
+    n_brut = df.height
+
+    def _log_etape(nom: str, hauteur: int) -> None:
+        pct_brut = hauteur / n_brut * 100 if n_brut else 0.0
+        logger.info(
+            "[VOLUME CUMULE] Apres {} : {} lignes restantes, soit {:.2f}% du volume brut "
+            "initial ({} lignes)",
+            nom, hauteur, pct_brut, n_brut,
+        )
+
+    _log_etape("concatenation (etat initial)", df.height)
 
     # --- 1bis. Regles metier (filtres) ---
     if cfg.cleaning.remove_duplicates:
         n_avant = df.height
         df = df.unique()
-        logger.info("Doublons supprimes : {} -> {} lignes", n_avant, df.height)
+        n_retire = n_avant - df.height
+        logger.info(
+            "[Filtre 1/5 - Doublons stricts] Lignes strictement identiques (toutes colonnes) : "
+            "{} -> {} lignes ({} retirees, {:.2f}% du volume entrant)",
+            n_avant, df.height, n_retire, n_retire / n_avant * 100 if n_avant else 0.0,
+        )
+    else:
+        logger.info("[Filtre 1/5 - Doublons stricts] Desactive (cleaning.remove_duplicates=false), aucune ligne retiree.")
+    _log_etape("Filtre 1/5 - Doublons stricts", df.height)
 
     # TAG (deja calcule cote source) classe chaque ligne selon un niveau de
     # doublon detecte en amont ("unique", "doublon_niv_1".."doublon_niv_4").
@@ -163,9 +214,21 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
     # comptes deux fois dans les traitements en aval.
     if "TAG" in df.columns:
         n_avant = df.height
+        tag_counts = df["TAG"].value_counts().sort("count", descending=True)
         df = df.filter(pl.col("TAG") == "unique")
-        logger.info("Lignes non uniques (TAG != 'unique') exclues : {} -> {} lignes",
-                     n_avant, df.height)
+        n_retire = n_avant - df.height
+        logger.info(
+            "[Filtre 2/5 - Colonne TAG] Repartition avant filtre : {}",
+            {row["TAG"]: row["count"] for row in tag_counts.iter_rows(named=True)},
+        )
+        logger.info(
+            "[Filtre 2/5 - Colonne TAG] Lignes non uniques (TAG != 'unique') exclues : "
+            "{} -> {} lignes ({} retirees, {:.2f}% du volume entrant)",
+            n_avant, df.height, n_retire, n_retire / n_avant * 100 if n_avant else 0.0,
+        )
+    else:
+        logger.info("[Filtre 2/5 - Colonne TAG] Colonne absente, filtre ignore.")
+    _log_etape("Filtre 2/5 - Colonne TAG", df.height)
 
     # Doublons d'ID_INDIV au sein d'un meme mois, chez le MEME employeur :
     # un individu ne devrait avoir qu'une seule declaration par employeur et
@@ -184,29 +247,95 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
             df.sort("SALAIRE_BRUT", descending=True, nulls_last=True)
             .unique(subset=cle_dedup, keep="first", maintain_order=True)
         )
+        n_retire = n_avant - df.height
         logger.info(
-            "Doublons ID_INDIV+ID_EMPLOYEUR par mois (meme employeur, salaire le plus eleve conserve) : {} -> {} lignes",
-            n_avant, df.height,
+            "[Filtre 3/5 - Doublons ID_INDIV+ID_EMPLOYEUR] Cle : {} (meme employeur, salaire le "
+            "plus eleve conserve ; cumuls d'emplois chez des employeurs differents non touches) : "
+            "{} -> {} lignes ({} retirees, {:.2f}% du volume entrant)",
+            cle_dedup, n_avant, df.height, n_retire, n_retire / n_avant * 100 if n_avant else 0.0,
         )
+    else:
+        logger.info(
+            "[Filtre 3/5 - Doublons ID_INDIV+ID_EMPLOYEUR] Colonnes requises absentes "
+            "(ID_INDIV, ID_EMPLOYEUR, SALAIRE_BRUT, PERIOD/ANNEE+MOIS), filtre ignore."
+        )
+    _log_etape("Filtre 3/5 - Doublons ID_INDIV+ID_EMPLOYEUR", df.height)
 
-    if "TYPE_SALARIE" in df.columns and cfg.cleaning.exclude_employee_types:
+    if "TYPE_SALARIE" in df.columns and cfg.cleaning.exclude_employee_types and not include_hj_estimated:
         n_avant = df.height
+        type_counts_avant = df["TYPE_SALARIE"].value_counts().sort("count", descending=True)
+        # IMPORTANT : is_in() sur une valeur TYPE_SALARIE null renvoie null (pas
+        # False) en Polars, et ~null est traite comme faux par .filter() -- donc
+        # sans le is_null() explicite ci-dessous, ce filtre exclurait AUSSI,
+        # silencieusement, toutes les lignes a TYPE_SALARIE non renseigne (qui
+        # se trouvent avoir systematiquement SALAIRE_BRUT egalement manquant,
+        # cf. TRAITEMENT_MANOUAN.md). Ce n'etait pas l'intention du filtre :
+        # seuls H/J doivent etre exclus, les lignes non renseignees doivent
+        # rester disponibles pour l'imputation en aval (etapes 07/08/09).
         df = df.filter(
-            ~pl.col("TYPE_SALARIE").is_in(cfg.cleaning.exclude_employee_types)
+            pl.col("TYPE_SALARIE").is_null()
+            | ~pl.col("TYPE_SALARIE").is_in(cfg.cleaning.exclude_employee_types)
         )
-        logger.info("Types d'employes exclus {} : {} -> {} lignes",
-                     cfg.cleaning.exclude_employee_types, n_avant, df.height)
+        n_retire = n_avant - df.height
+        logger.info(
+            "[Filtre 4/5 - Types d'employes exclus] Repartition TYPE_SALARIE avant filtre : {}",
+            {row["TYPE_SALARIE"]: row["count"] for row in type_counts_avant.iter_rows(named=True)},
+        )
+        logger.info(
+            "[Filtre 4/5 - Types d'employes exclus] Types {} exclus, TYPE_SALARIE non renseigne "
+            "CONSERVE (include_hj_estimated=False) : {} -> {} lignes ({} retirees, {:.2f}% du "
+            "volume entrant -- c'est generalement le filtre qui retire le plus de lignes de "
+            "toute l'etape 03, verifier ce pourcentage)",
+            cfg.cleaning.exclude_employee_types, n_avant, df.height, n_retire,
+            n_retire / n_avant * 100 if n_avant else 0.0,
+        )
+    elif "TYPE_SALARIE" in df.columns and cfg.cleaning.exclude_employee_types and include_hj_estimated:
+        logger.info(
+            "[Filtre 4/5 - Types d'employes exclus] IGNORE (include_hj_estimated=True) : "
+            "les types {} sont CONSERVES ; SALAIRE_BRUT_ESTIME_AU_MOIS leur sera calcule "
+            "en section 3 au lieu de les exclure.",
+            cfg.cleaning.exclude_employee_types,
+        )
+    else:
+        logger.info("[Filtre 4/5 - Types d'employes exclus] TYPE_SALARIE absent ou exclude_employee_types vide, filtre ignore.")
+    _log_etape("Filtre 4/5 - Types d'employes exclus", df.height)
 
     if "SALAIRE_BRUT" in df.columns:
-        # Ce filtre unique (SALAIRE_BRUT >= min_salary) exclut en une seule
-        # passe TROIS categories distinctes d'incoherence, toutes < min_salary :
+        # Seuil de plausibilite du salaire, EVENTUELLEMENT ventile par
+        # periodicite (TYPE_SALARIE) quand H/J sont conserves : un taux
+        # journalier de 3 000 FCFA est parfaitement plausible (~2 885 FCFA/jour
+        # attendu) mais serait exclu a tort par une comparaison directe au
+        # seuil mensuel (75 000). Sans TYPE_SALARIE exploitable (colonne
+        # absente, ou include_hj_estimated=False ou les H/J sont deja exclus
+        # au filtre precedent), le seuil mensuel s'applique tel quel a tout
+        # le monde -- comportement historique inchange dans ce cas.
+        if include_hj_estimated and "TYPE_SALARIE" in df.columns:
+            seuil_journalier = cfg.cleaning.min_salary / _JOURS_OUVRES_PAR_MOIS
+            seuil_horaire = cfg.cleaning.min_salary / _HEURES_PAR_MOIS
+            seuil_expr = (
+                pl.when(pl.col("TYPE_SALARIE") == "J").then(pl.lit(seuil_journalier))
+                .when(pl.col("TYPE_SALARIE") == "H").then(pl.lit(seuil_horaire))
+                .otherwise(pl.lit(cfg.cleaning.min_salary))
+            )
+            logger.info(
+                "[Filtre 5/5 - Salaire minimum] Seuils par periodicite (include_hj_estimated=True) : "
+                "Mensuel/autre={:.0f} FCFA, Journalier={:.0f} FCFA/jour, Horaire={:.0f} FCFA/h",
+                cfg.cleaning.min_salary, seuil_journalier, seuil_horaire,
+            )
+        else:
+            seuil_expr = pl.lit(cfg.cleaning.min_salary)
+
+        # Ce filtre unique (SALAIRE_BRUT >= seuil) exclut en une seule
+        # passe TROIS categories distinctes d'incoherence, toutes < seuil :
         #   - les salaires negatifs (impossibles en toute circonstance) ;
         #   - les salaires nuls / a zero ;
         #   - les salaires positifs mais sous le seuil (SMIG mensuel, 75 000
-        #     FCFA par defaut, cf. cleaning.min_salary dans settings.yaml).
+        #     FCFA par defaut, cf. cleaning.min_salary dans settings.yaml,
+        #     ou seuil par periodicite ci-dessus si include_hj_estimated).
         # Les valeurs SALAIRE_BRUT.is_null() sont explicitement exemptees
         # (conservees telles quelles, une absence de salaire n'est pas la
-        # meme incoherence qu'un montant errone).
+        # meme incoherence qu'un montant errone -- elle reste disponible pour
+        # l'imputation en aval, etapes 07/08/09).
         # Le detail par categorie (nb negatifs, nb nuls, nb sous-seuil) est
         # logue separement ci-dessous a titre informatif uniquement : il ne
         # s'agit PAS de trois filtres distincts, seulement d'un decompte pour
@@ -215,20 +344,28 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
         n_negatifs = df.filter(pl.col("SALAIRE_BRUT") < 0).height
         n_nuls = df.filter(pl.col("SALAIRE_BRUT") == 0).height
         n_sous_seuil = df.filter(
-            (pl.col("SALAIRE_BRUT") > 0) & (pl.col("SALAIRE_BRUT") < cfg.cleaning.min_salary)
+            (pl.col("SALAIRE_BRUT") > 0) & (pl.col("SALAIRE_BRUT") < seuil_expr)
         ).height
         logger.info(
-            "Detail des salaires sous le seuil minimum ({:.0f}) a exclure : "
-            "{} negatifs, {} nuls (zero), {} positifs sous le seuil",
-            cfg.cleaning.min_salary, n_negatifs, n_nuls, n_sous_seuil,
+            "[Filtre 5/5 - Salaire minimum] Detail des salaires sous seuil a exclure : "
+            "{} negatifs + {} nuls (zero) + {} positifs sous le seuil = {} lignes au total",
+            n_negatifs, n_nuls, n_sous_seuil,
+            n_negatifs + n_nuls + n_sous_seuil,
         )
 
         n_avant = df.height
         df = df.filter(
-            pl.col("SALAIRE_BRUT").is_null() | (pl.col("SALAIRE_BRUT") >= cfg.cleaning.min_salary)
+            pl.col("SALAIRE_BRUT").is_null() | (pl.col("SALAIRE_BRUT") >= seuil_expr)
         )
-        logger.info("Salaires sous le seuil minimum ({:.0f}) exclus (negatifs+nuls+sous-seuil) : {} -> {} lignes",
-                     cfg.cleaning.min_salary, n_avant, df.height)
+        n_retire = n_avant - df.height
+        logger.info(
+            "[Filtre 5/5 - Salaire minimum] Salaires sous seuil exclus (negatifs+nuls+sous-seuil, "
+            "salaires manquants CONSERVES) : {} -> {} lignes ({} retirees, {:.2f}% du volume entrant)",
+            n_avant, df.height, n_retire, n_retire / n_avant * 100 if n_avant else 0.0,
+        )
+    else:
+        logger.info("[Filtre 5/5 - Salaire minimum] SALAIRE_BRUT absent, filtre ignore.")
+    _log_etape("Filtre 5/5 - Salaire minimum (fin des filtres de nettoyage)", df.height)
 
     # --- 2. Variables derivees ---
     ref_date = date.today()
@@ -252,6 +389,122 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
         )
         logger.info("Winsorisation SALAIRE_BRUT_MENS : bornes [{:.0f}, {:.0f}] (p{:.0f}/p{:.0f})",
                     lo, hi, cfg.cleaning.winsor_lower * 100, cfg.cleaning.winsor_upper * 100)
+
+    # --- SALAIRE_BRUT_ESTIME_AU_MOIS ---
+    # Contrairement a SALAIRE_BRUT_MENS (qui suppose DUREE_TRAVAILLEE exprimee
+    # en mois, borne a max_duration=12 -- coherent uniquement pour TYPE_SALARIE
+    # == "M"), cette variable estime un equivalent MENSUEL du salaire pour
+    # CHAQUE periodicite declaree, en appliquant le taux journalier/horaire
+    # aux jours/heures ouvres standard d'un mois complet (26 jours, 208h) :
+    #   - Mensuel (M)    : SALAIRE_BRUT tel quel (deja un montant mensuel).
+    #   - Journalier (J) : SALAIRE_BRUT (taux/jour) x 26 jours ouvres/mois.
+    #   - Horaire (H)    : SALAIRE_BRUT (taux/heure) x 208h/mois (26j x 8h).
+    #   - Autre/absent   : SALAIRE_BRUT tel quel (aucune conversion connue).
+    # Memes conventions que audit.py::_check_analyse_salaire (SEUIL_PLAUSIBLE)
+    # et le notebook analyse_incoherences_salaires.ipynb (SEUIL_PLAUSIBLE) --
+    # a garder alignees si l'une des trois est modifiee.
+    if "SALAIRE_BRUT" in df.columns:
+        if "TYPE_SALARIE" in df.columns:
+            df = df.with_columns(
+                pl.when(pl.col("TYPE_SALARIE") == "J")
+                .then(pl.col("SALAIRE_BRUT") * _JOURS_OUVRES_PAR_MOIS)
+                .when(pl.col("TYPE_SALARIE") == "H")
+                .then(pl.col("SALAIRE_BRUT") * _HEURES_PAR_MOIS)
+                .otherwise(pl.col("SALAIRE_BRUT"))
+                .alias("SALAIRE_BRUT_ESTIME_AU_MOIS")
+            )
+            n_j = df.filter(pl.col("TYPE_SALARIE") == "J").height
+            n_h = df.filter(pl.col("TYPE_SALARIE") == "H").height
+            logger.info(
+                "SALAIRE_BRUT_ESTIME_AU_MOIS calcule : Mensuel/autre inchange, "
+                "Journalier x{} ({} lignes), Horaire x{} ({} lignes)",
+                _JOURS_OUVRES_PAR_MOIS, n_j, _HEURES_PAR_MOIS, n_h,
+            )
+        else:
+            df = df.with_columns(pl.col("SALAIRE_BRUT").alias("SALAIRE_BRUT_ESTIME_AU_MOIS"))
+            logger.info(
+                "SALAIRE_BRUT_ESTIME_AU_MOIS = SALAIRE_BRUT (TYPE_SALARIE absent, "
+                "aucune conversion de periodicite possible)."
+            )
+
+    # --- SALAIRE_BRUT_IMPUTE_INDIV : imputation par continuite individuelle ---
+    # Complementaire a l'imputation par entreprise de l'etape 08
+    # (08_imputation_salaires.py, modele log-lineaire au niveau entreprise-
+    # periode) : ici, on exploite le fait qu'un MEME individu (ID_INDIV) peut
+    # avoir des declarations renseignees a d'autres mois que celui ou son
+    # salaire manque (ex. fevrier manquant, janvier et mars renseignes).
+    #
+    # Regle (backward/forward) appliquee sur SALAIRE_BRUT_ESTIME_AU_MOIS,
+    # trie chronologiquement par individu :
+    #   - Si un salaire renseigne existe AVANT et APRES le mois manquant :
+    #     moyenne des deux.
+    #   - Si seulement AVANT (backward / LOCF) : cette valeur.
+    #   - Si seulement APRES (forward / NOCB) : cette valeur.
+    #   - Si aucun des deux (l'individu n'a jamais de salaire renseigne sur
+    #     toute la periode observee) : reste manquant, non imputable ici.
+    #
+    # Nouvelle colonne separee (ne modifie ni SALAIRE_BRUT, donnee source
+    # brute, ni SALAIRE_BRUT_ESTIME_AU_MOIS, deja une estimation de
+    # periodicite) + FLAG_IMPUTE_INDIV pour tracer precisement les lignes
+    # concernees (declare vs impute par continuite).
+    _cols_periode_impute = [c for c in ("PERIOD", "ANNEE", "MOIS") if c in df.columns]
+    if "ID_INDIV" in df.columns and _cols_periode_impute and "SALAIRE_BRUT_ESTIME_AU_MOIS" in df.columns:
+        n_manquant_avant = df["SALAIRE_BRUT_ESTIME_AU_MOIS"].null_count()
+
+        df = df.sort(["ID_INDIV", *_cols_periode_impute])
+        df = df.with_columns(
+            pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS")
+            .forward_fill()
+            .over("ID_INDIV")
+            .alias("_SALAIRE_BACKWARD"),
+            pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS")
+            .backward_fill()
+            .over("ID_INDIV")
+            .alias("_SALAIRE_FORWARD"),
+        )
+        df = df.with_columns(
+            pl.when(pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS").is_not_null())
+            .then(pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS"))
+            .when(pl.col("_SALAIRE_BACKWARD").is_not_null() & pl.col("_SALAIRE_FORWARD").is_not_null())
+            .then((pl.col("_SALAIRE_BACKWARD") + pl.col("_SALAIRE_FORWARD")) / 2)
+            .when(pl.col("_SALAIRE_BACKWARD").is_not_null())
+            .then(pl.col("_SALAIRE_BACKWARD"))
+            .when(pl.col("_SALAIRE_FORWARD").is_not_null())
+            .then(pl.col("_SALAIRE_FORWARD"))
+            .otherwise(None)
+            .alias("SALAIRE_BRUT_IMPUTE_INDIV"),
+            (
+                pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS").is_null()
+                & (pl.col("_SALAIRE_BACKWARD").is_not_null() | pl.col("_SALAIRE_FORWARD").is_not_null())
+            ).alias("FLAG_IMPUTE_INDIV"),
+        )
+        df = df.drop("_SALAIRE_BACKWARD", "_SALAIRE_FORWARD")
+
+        n_impute = df["FLAG_IMPUTE_INDIV"].sum()
+        n_manquant_apres = df["SALAIRE_BRUT_IMPUTE_INDIV"].null_count()
+        pct_complet_avant = (1 - n_manquant_avant / df.height) * 100 if df.height else 0.0
+        pct_complet_apres = (1 - n_manquant_apres / df.height) * 100 if df.height else 0.0
+        logger.info(
+            "SALAIRE_BRUT_IMPUTE_INDIV calcule (continuite par ID_INDIV, backward/forward, "
+            "moyenne si les deux disponibles) : {} salaires manquants au depart, {} impute(s) "
+            "par continuite individuelle, {} restent non imputables (aucune declaration de "
+            "l'individu sur toute la periode observee)",
+            n_manquant_avant, n_impute, n_manquant_apres,
+        )
+        logger.info(
+            "[TAUX DE COMPLETUDE DU SALAIRE] Avant imputation individuelle : {:.2f}% des lignes "
+            "renseignees ({}/{}). Apres imputation individuelle : {:.2f}% renseignees ({}/{}), "
+            "soit +{:.2f} points grace a SALAIRE_BRUT_IMPUTE_INDIV.",
+            pct_complet_avant, df.height - n_manquant_avant, df.height,
+            pct_complet_apres, df.height - n_manquant_apres, df.height,
+            pct_complet_apres - pct_complet_avant,
+        )
+    elif "SALAIRE_BRUT_ESTIME_AU_MOIS" in df.columns:
+        logger.info(
+            "SALAIRE_BRUT_IMPUTE_INDIV non calcule : ID_INDIV ou colonne de periode "
+            "(PERIOD/ANNEE+MOIS) absente."
+        )
+    _log_etape("Imputation par continuite individuelle (SALAIRE_BRUT_IMPUTE_INDIV)", df.height)
 
     if "DATE_NAISSANCE" in df.columns:
         df = df.with_columns(
@@ -326,6 +579,13 @@ def nettoyer_donnees(cfg: PipelineConfig) -> str:
     write_parquet(cfg.minio, cfg.minio.cleaned_bucket, out_object, df)
     logger.info("Donnees nettoyees ecrites : {} ({} lignes, {} colonnes)",
                 out_object, df.height, df.width)
+    logger.info(
+        "[VOLUME CUMULE - RECAPITULATIF FINAL] {} lignes brutes -> {} lignes en sortie, "
+        "soit {:.2f}% du volume brut conserve au total ({:.2f}% retire cumule, tous filtres "
+        "confondus).",
+        n_brut, df.height, df.height / n_brut * 100 if n_brut else 0.0,
+        (n_brut - df.height) / n_brut * 100 if n_brut else 0.0,
+    )
 
     return out_object
 
@@ -340,6 +600,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--settings", "-s", type=Path, default=None)
     parser.add_argument("--dimensions", "-d", type=Path, default=None)
+    parser.add_argument(
+        "--include-hj-estimated", action="store_true",
+        help="Conserve les types d'employes journaliers/horaires (H/J) au lieu de "
+             "les exclure, en leur calculant SALAIRE_BRUT_ESTIME_AU_MOIS (equivalent "
+             "mensuel estime a partir du taux journalier/horaire declare). Ne modifie "
+             "pas cleaning.exclude_employee_types dans settings.yaml : ce choix "
+             "n'est valable que pour cette execution.",
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -358,7 +626,7 @@ if __name__ == "__main__":
     )
 
     try:
-        nettoyer_donnees(cfg)
+        nettoyer_donnees(cfg, include_hj_estimated=args.include_hj_estimated)
         logger.info("Termine avec succes.")
     except Exception as exc:
         logger.exception("Echec de l'etape: {}", exc)

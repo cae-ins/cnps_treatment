@@ -37,12 +37,19 @@ def discover_stages() -> list[tuple[str, Path]]:
     return sorted(found, key=lambda t: t[0])
 
 
-def run_orchestrated(from_num: str, to_num: str, verbose: bool = False) -> list[dict]:
+def run_orchestrated(
+    from_num: str, to_num: str, verbose: bool = False, include_hj_estimated: bool = False,
+) -> list[dict]:
     stages = [(n, p) for n, p in discover_stages() if from_num <= n <= to_num]
     results = []
 
     for num, script in stages:
         cmd = [sys.executable, str(script)] + (["--verbose"] if verbose else [])
+        # --include-hj-estimated ne concerne que l'etape 03 (03_nettoyage_donnees.py) :
+        # les autres etapes n'exposent pas ce flag dans leur propre argparse et
+        # echoueraient si on le leur passait aussi.
+        if num == "03" and include_hj_estimated:
+            cmd.append("--include-hj-estimated")
 
         logger.info("=" * 60)
         logger.info("SOUS-PROCESSUS {} : {}", num, script.name)
@@ -75,6 +82,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--from", dest="from_num", default="01")
     parser.add_argument("--to", dest="to_num", default="12")
+    parser.add_argument(
+        "--include-hj-estimated", "--include_hj_estimated",
+        dest="include_hj_estimated", action="store_true",
+        help="Relaye a l'etape 03 (03_nettoyage_donnees.py) uniquement : conserve "
+             "les journaliers/horaires (H/J) avec SALAIRE_BRUT_ESTIME_AU_MOIS au "
+             "lieu de les exclure. Les deux graphies (tiret/underscore) sont "
+             "acceptees.",
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -91,7 +106,10 @@ if __name__ == "__main__":
         level="DEBUG", rotation="10 MB", retention="30 days", encoding="utf-8",
     )
 
-    results = run_orchestrated(args.from_num.zfill(2), args.to_num.zfill(2), verbose=args.verbose)
+    results = run_orchestrated(
+        args.from_num.zfill(2), args.to_num.zfill(2),
+        verbose=args.verbose, include_hj_estimated=args.include_hj_estimated,
+    )
 
     logger.info("=" * 60)
     logger.info("RESUME")
