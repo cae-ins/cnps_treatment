@@ -624,76 +624,98 @@ def _check_non_declarants(
     salary_var: str = "SALAIRE_BRUT",
     id_var: str = "ID_INDIV",
     type_var: str = "TYPE_SALARIE",
+    hire_date_var: str = "DATE_EMBAUCHE",
 ) -> pl.DataFrame:
     """
-    13. Individus presents dans les fichiers mais sans aucun salaire declare.
+    13. Individus qui n'ont aucun salaire declare alors qu'ils etaient
+    embauches.
 
-    Deux niveaux de lecture, empiles dans la meme feuille via la colonne
-    ``perimetre`` :
+    Ne sont comptes que les individus ayant au moins un mois **posterieur a
+    leur DATE_EMBAUCHE** dans le perimetre considere : sans mois eligible, il
+    n'y a pas de declaration attendue, donc pas de defaut a constater. Meme
+    regle que la feuille Couverture_Declaration, pour que les deux feuilles
+    comptent la meme chose (colonne ``nb_individus_eligibles``).
 
-    - une ligne par annee : individus presents cette annee-la sans jamais de
-      salaire declare sur l'annee ;
+    Trois lignes, via la colonne ``perimetre`` :
+
+    - une ligne par annee : individus embauches et presents cette annee-la,
+      sans aucun salaire declare sur l'annee ;
     - une ligne ``TOUTES_PERIODES`` : individus sans aucun salaire declare sur
       l'ensemble des mois charges. Ce sont les seuls veritablement
       **non imputables par continuite individuelle** (backward/forward de
       l'etape 03) : aucune valeur du meme individu n'existe nulle part pour
       servir de base. Ils relevent de l'imputation au niveau entreprise
       (etape 08) ou d'un traitement dedie.
+
+    Les lignes annuelles et la ligne globale ne se somment pas : un individu
+    muet en 2024 mais declarant en 2025 compte dans la premiere et pas dans
+    la seconde. L'ecart mesure les individus rattrapables grace a l'autre
+    annee.
     """
-    colonnes = [c for c in (id_var, salary_var, type_var) if c]
+    schema_vide = {
+        "perimetre": pl.Utf8, "nb_individus_presents": pl.Int64,
+        "nb_individus_eligibles": pl.Int64, "nb_jamais_declarant": pl.Int64,
+        "pct_jamais_declarant": pl.Float64, "nb_au_moins_une_declaration": pl.Int64,
+    }
+
+    colonnes = [c for c in (id_var, salary_var, type_var, hire_date_var) if c]
     df = _concat_periodes(data, colonnes)
     if df is None:
-        df = _concat_periodes(data, [id_var, salary_var])
+        df = _concat_periodes(data, [c for c in colonnes if c != hire_date_var])
+        hire_date_var = ""
     if df is None:
-        return pl.DataFrame(schema={
-            "perimetre": pl.Utf8, "nb_individus_presents": pl.Int64,
-            "nb_jamais_declarant": pl.Int64, "pct_jamais_declarant": pl.Float64,
-            "nb_au_moins_une_declaration": pl.Int64,
-        })
+        df = _concat_periodes(data, [id_var, salary_var])
+        type_var = ""
+    if df is None:
+        return pl.DataFrame(schema=schema_vide)
 
     df = _ajouter_salaire_mensuel(df, salary_var, type_var)
     df = df.with_columns(
-        (pl.col("_SAL_MENS").is_not_null() & (pl.col("_SAL_MENS") > 0)).alias("_DECLARE")
+        (pl.col("_SAL_MENS").is_not_null() & (pl.col("_SAL_MENS") > 0)).alias("_DECLARE"),
+        (pl.col("_ANNEE") * 12 + pl.col("_MOIS")).alias("_T"),
     )
 
-    rows = []
-
-    par_annee = (
-        df.group_by(["_ANNEE", id_var])
-        .agg(pl.col("_DECLARE").any().alias("_a_declare"))
-        .group_by("_ANNEE")
-        .agg(
-            pl.len().alias("nb_individus_presents"),
-            (~pl.col("_a_declare")).sum().alias("nb_jamais_declarant"),
+    if hire_date_var:
+        # Un mois n'est eligible que s'il suit le mois d'embauche : avant, il
+        # n'y avait pas de declaration a attendre.
+        df = df.with_columns(
+            (
+                pl.col("_T")
+                >= (pl.col(hire_date_var).dt.year() * 12 + pl.col(hire_date_var).dt.month())
+            )
+            .fill_null(True)
+            .alias("_ELIGIBLE")
         )
-        .sort("_ANNEE")
-    )
-    for r in par_annee.iter_rows(named=True):
-        n_tot = r["nb_individus_presents"]
-        n_jamais = r["nb_jamais_declarant"]
-        rows.append({
-            "perimetre": str(r["_ANNEE"]),
-            "nb_individus_presents": n_tot,
+    else:
+        df = df.with_columns(pl.lit(True).alias("_ELIGIBLE"))
+
+    def _resume(perimetre: str, sous: pl.DataFrame) -> dict:
+        par_indiv = sous.group_by(id_var).agg(
+            pl.col("_ELIGIBLE").any().alias("_eligible"),
+            (pl.col("_DECLARE") & pl.col("_ELIGIBLE")).any().alias("_a_declare"),
+        )
+        n_presents = par_indiv.height
+        eligibles = par_indiv.filter(pl.col("_eligible"))
+        n_eligibles = eligibles.height
+        n_jamais = int(eligibles.filter(~pl.col("_a_declare")).height)
+        return {
+            "perimetre": perimetre,
+            "nb_individus_presents": n_presents,
+            "nb_individus_eligibles": n_eligibles,
             "nb_jamais_declarant": n_jamais,
-            "pct_jamais_declarant": round(n_jamais / n_tot * 100, 2) if n_tot else None,
-            "nb_au_moins_une_declaration": n_tot - n_jamais,
-        })
+            "pct_jamais_declarant": (
+                round(n_jamais / n_eligibles * 100, 2) if n_eligibles else None
+            ),
+            "nb_au_moins_une_declaration": n_eligibles - n_jamais,
+        }
 
-    global_ = (
-        df.group_by(id_var)
-        .agg(pl.col("_DECLARE").any().alias("_a_declare"))
-    )
-    n_tot = global_.height
-    n_jamais = int(global_.filter(~pl.col("_a_declare")).height)
-    rows.append({
-        "perimetre": "TOUTES_PERIODES",
-        "nb_individus_presents": n_tot,
-        "nb_jamais_declarant": n_jamais,
-        "pct_jamais_declarant": round(n_jamais / n_tot * 100, 2) if n_tot else None,
-        "nb_au_moins_une_declaration": n_tot - n_jamais,
-    })
+    rows = [
+        _resume(str(annee), df.filter(pl.col("_ANNEE") == annee))
+        for annee in sorted(df["_ANNEE"].unique().to_list())
+    ]
+    rows.append(_resume("TOUTES_PERIODES", df))
 
-    return pl.DataFrame(rows)
+    return pl.DataFrame(rows, schema_overrides=schema_vide)
 
 
 def _check_changement_employeur(
@@ -1195,18 +1217,24 @@ _GUIDE_LECTURE: list[tuple[str, str, str]] = [
     ),
     (
         "Non_Declarants",
-        "Denombrer les individus presents dans les fichiers mais sans aucun "
-        "salaire declare : une ligne par annee, plus une ligne "
-        "TOUTES_PERIODES sur l'ensemble des mois charges.",
+        "Denombrer les individus qui n'ont aucun salaire declare alors qu'ils "
+        "etaient embauches : une ligne par annee, plus une ligne "
+        "TOUTES_PERIODES sur l'ensemble des mois charges. Seuls les individus "
+        "ayant au moins un mois posterieur a leur DATE_EMBAUCHE sont comptes "
+        "(colonne nb_individus_eligibles) — meme regle que la feuille "
+        "Couverture_Declaration, pour que les deux feuilles comptent la meme "
+        "chose. Sans mois eligible, il n'y a pas de declaration attendue, donc "
+        "pas de defaut a constater : l'ecart entre nb_individus_presents et "
+        "nb_individus_eligibles mesure ces individus-la.",
         "La ligne TOUTES_PERIODES isole les individus reellement non imputables "
         "par continuite individuelle : aucune valeur du meme individu n'existe "
         "nulle part pour servir de base a un report backward/forward. Ils "
         "relevent de l'imputation au niveau entreprise (etape 08) ou d'un "
         "traitement dedie. Un individu jamais declarant une annee mais "
         "declarant l'autre reste, lui, imputable a partir de l'autre annee : "
-        "c'est pourquoi les lignes annuelles et la ligne TOUTES_PERIODES ne "
-        "donnent pas le meme decompte, et que seule la seconde mesure "
-        "l'impasse d'imputation.",
+        "c'est pourquoi les lignes annuelles et la ligne TOUTES_PERIODES ne se "
+        "somment pas, et que seule la seconde mesure l'impasse d'imputation. "
+        "Le pourcentage est calcule sur les eligibles, pas sur les presents.",
     ),
     (
         "Changement_Employeur",
@@ -1594,7 +1622,8 @@ def executer_audit(
 
     logger.info("13/14 - Individus sans aucune declaration de salaire...")
     df_non_declarants = _check_non_declarants(
-        data, salary_var=salary_var, id_var=id_var, type_var=type_var
+        data, salary_var=salary_var, id_var=id_var, type_var=type_var,
+        hire_date_var=hire_date_var,
     )
 
     logger.info("14/14 - Variation de salaire lors d'un changement d'employeur...")
