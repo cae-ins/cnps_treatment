@@ -301,15 +301,23 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     _log_etape("Filtre 4/5 - Types d'employes exclus", df.height)
 
     if "SALAIRE_BRUT" in df.columns:
-        # Seuil de plausibilite du salaire, EVENTUELLEMENT ventile par
-        # periodicite (TYPE_SALARIE) quand H/J sont conserves : un taux
-        # journalier de 3 000 FCFA est parfaitement plausible (~2 885 FCFA/jour
-        # attendu) mais serait exclu a tort par une comparaison directe au
-        # seuil mensuel (75 000). Sans TYPE_SALARIE exploitable (colonne
-        # absente, ou include_hj_estimated=False ou les H/J sont deja exclus
-        # au filtre precedent), le seuil mensuel s'applique tel quel a tout
-        # le monde -- comportement historique inchange dans ce cas.
-        if include_hj_estimated and "TYPE_SALARIE" in df.columns:
+        # Seuil de plausibilite du salaire, ventile par periodicite
+        # (TYPE_SALARIE) des qu'un type non mensuel subsiste dans les donnees :
+        # un taux journalier de 3 000 FCFA est parfaitement plausible
+        # (~2 885 FCFA/jour attendu) mais serait exclu a tort par une
+        # comparaison directe au seuil mensuel (75 000).
+        #
+        # La condition ne peut PAS dependre du seul include_hj_estimated :
+        # depuis que exclude_employee_types vaut ["H"] (les journaliers sont
+        # conserves par defaut, cf. settings.yaml), des lignes "J" survivent au
+        # filtre 4/5 meme en mode par defaut. Les comparer a 75 000 FCFA/jour
+        # les eliminerait presque toutes. On ventile donc des qu'un type J ou H
+        # est effectivement present apres le filtre precedent.
+        _types_restants = (
+            set(df["TYPE_SALARIE"].drop_nulls().unique().to_list())
+            if "TYPE_SALARIE" in df.columns else set()
+        )
+        if _types_restants & {"J", "H"}:
             seuil_journalier = cfg.cleaning.min_salary / _JOURS_OUVRES_PAR_MOIS
             seuil_horaire = cfg.cleaning.min_salary / _HEURES_PAR_MOIS
             seuil_expr = (
@@ -318,8 +326,10 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
                 .otherwise(pl.lit(cfg.cleaning.min_salary))
             )
             logger.info(
-                "[Filtre 5/5 - Salaire minimum] Seuils par periodicite (include_hj_estimated=True) : "
-                "Mensuel/autre={:.0f} FCFA, Journalier={:.0f} FCFA/jour, Horaire={:.0f} FCFA/h",
+                "[Filtre 5/5 - Salaire minimum] Seuils par periodicite (types non mensuels "
+                "presents : {}) : Mensuel/autre={:.0f} FCFA, Journalier={:.0f} FCFA/jour, "
+                "Horaire={:.0f} FCFA/h",
+                sorted(_types_restants & {"J", "H"}),
                 cfg.cleaning.min_salary, seuil_journalier, seuil_horaire,
             )
         else:
@@ -370,25 +380,17 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     # --- 2. Variables derivees ---
     ref_date = date.today()
 
+    # SALAIRE_BRUT_MENS : variable HISTORIQUE, conservee pour compatibilite.
+    # Elle n'est plus la reference des etapes aval (voir SALAIRE_BRUT_ESTIME_AU_MOIS
+    # ci-dessous) et n'est plus winsorisee : la winsorisation a ete deplacee
+    # apres la conversion de periodicite, ou elle a un sens (cf. plus bas).
+    # Rappel de sa limite : elle suppose DUREE_TRAVAILLEE exprimee en mois, ce
+    # que l'audit infirme pour les horaires (69% de durees incoherentes).
     if "SALAIRE_BRUT" in df.columns and "DUREE_TRAVAILLEE" in df.columns:
         df = df.with_columns(
             (pl.col("SALAIRE_BRUT") / pl.col("DUREE_TRAVAILLEE").clip(1, cfg.cleaning.max_duration) * 12)
             .alias("SALAIRE_BRUT_MENS")
         )
-
-        # --- Winsorisation des valeurs extremes de salaire (Tukey, 1977) ---
-        # Ecrete (sans supprimer les lignes) au-dela des percentiles configures :
-        # limite l'influence des erreurs de saisie / cas extremes sur la
-        # moyenne, la variance et les autres estimateurs ponderes (etape 10).
-        lo, hi = df.select(
-            pl.col("SALAIRE_BRUT_MENS").quantile(cfg.cleaning.winsor_lower).alias("lo"),
-            pl.col("SALAIRE_BRUT_MENS").quantile(cfg.cleaning.winsor_upper).alias("hi"),
-        ).row(0)
-        df = df.with_columns(
-            pl.col("SALAIRE_BRUT_MENS").clip(lo, hi).alias("SALAIRE_BRUT_MENS")
-        )
-        logger.info("Winsorisation SALAIRE_BRUT_MENS : bornes [{:.0f}, {:.0f}] (p{:.0f}/p{:.0f})",
-                    lo, hi, cfg.cleaning.winsor_lower * 100, cfg.cleaning.winsor_upper * 100)
 
     # --- SALAIRE_BRUT_ESTIME_AU_MOIS ---
     # Contrairement a SALAIRE_BRUT_MENS (qui suppose DUREE_TRAVAILLEE exprimee
@@ -425,6 +427,51 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
             logger.info(
                 "SALAIRE_BRUT_ESTIME_AU_MOIS = SALAIRE_BRUT (TYPE_SALARIE absent, "
                 "aucune conversion de periodicite possible)."
+            )
+
+        # --- Winsorisation, APRES conversion de periodicite (Tukey, 1977) ---
+        #
+        # L'ordre est essentiel. Winsoriser AVANT conversion (comportement
+        # precedent, sur SALAIRE_BRUT_MENS) revient a calculer des percentiles
+        # sur une distribution melangeant trois echelles incomparables : un taux
+        # horaire (~500 F), un taux journalier (~3 000 F) et un salaire mensuel
+        # (~200 000 F). Le p1 global tombe alors dans la masse des taux
+        # horaires : presque tous les H/J passent sous cette borne et sont
+        # ecretes VERS LE HAUT -- un horaire a 500 F/h devenait artificiellement
+        # le p1 mensuel. On ne supprimait pas des valeurs aberrantes, on en
+        # fabriquait.
+        #
+        # Sur SALAIRE_BRUT_ESTIME_AU_MOIS, toutes les lignes sont ramenees a la
+        # meme echelle mensuelle : les percentiles ont un sens, et l'ecretage
+        # ne touche que de vraies valeurs extremes.
+        #
+        # Effet de bord assume : les deux extremites de la distribution sont
+        # ecrasees. Les statistiques d'inegalite (Gini, ratios inter-deciles,
+        # part du dernier centile) ne doivent PAS etre calculees sur cette
+        # variable -- utiliser SALAIRE_BRUT ou une version non winsorisee.
+        bornes = df.select(
+            pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS").quantile(cfg.cleaning.winsor_lower).alias("lo"),
+            pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS").quantile(cfg.cleaning.winsor_upper).alias("hi"),
+        ).row(0)
+        lo, hi = bornes
+        if lo is not None and hi is not None:
+            n_bas = df.filter(pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS") < lo).height
+            n_haut = df.filter(pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS") > hi).height
+            df = df.with_columns(
+                pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS").clip(lo, hi)
+                .alias("SALAIRE_BRUT_ESTIME_AU_MOIS")
+            )
+            logger.info(
+                "Winsorisation SALAIRE_BRUT_ESTIME_AU_MOIS (apres conversion de "
+                "periodicite) : bornes [{:.0f}, {:.0f}] (p{:.0f}/p{:.0f}), "
+                "{} valeurs ecretees en bas, {} en haut",
+                lo, hi, cfg.cleaning.winsor_lower * 100, cfg.cleaning.winsor_upper * 100,
+                n_bas, n_haut,
+            )
+        else:
+            logger.warning(
+                "Winsorisation impossible : aucune valeur exploitable dans "
+                "SALAIRE_BRUT_ESTIME_AU_MOIS."
             )
 
     # --- Pas d'imputation par continuite individuelle (retire volontairement) ---

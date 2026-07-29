@@ -32,7 +32,22 @@ cleaning:
   # Seuil minimum de salaire mensuel (FCFA)
   min_salary: 75000
   # Types d'employes a exclure (H=horaire, J=journalier)
-  exclude_employee_types: ["H", "J"]
+  #
+  # Horaires (H) EXCLUS -- decision fondee sur l'audit du 28/07/2026
+  # (feuille Analyse_Salaire, 23 fichiers) : sur 157 054 lignes horaires,
+  # 65,5% presentent une confusion d'unite suspectee et 69,0% une
+  # DUREE_TRAVAILLEE incoherente. La majorite n'est pas interpretable ;
+  # les convertir (x208) propagerait ces erreurs amplifiees. Pour 1,4% de
+  # l'effectif, le rapport benefice/risque est defavorable.
+  #
+  # Journaliers (J) CONSERVES : leur DUREE_TRAVAILLEE est saine (0,12%
+  # d'incoherence) et la conversion x26 repose donc sur une base fiable.
+  # Ils representent 5,7% des salaires a periodicite connue -- les exclure
+  # biaiserait la representativite vers les seuls emplois stables.
+  # (Les 45,7% de "confusions" detectees sur J sont vraisemblablement des
+  # faux positifs de l'heuristique : un journalier bien paye ressemble a un
+  # mensuel mal paye.)
+  exclude_employee_types: ["H"]
   # Winsorisation: percentiles de troncature
   winsor_lower: 0.01
   winsor_upper: 0.99

@@ -66,7 +66,20 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
     group_cols = [c for c in ["ID_EMPLOYEUR", "PERIOD", "MOIS", "ANNEE"]
                   if c in df.columns]
 
-    salary_col = "SALAIRE_BRUT_MENS" if "SALAIRE_BRUT_MENS" in df.columns else "SALAIRE_BRUT"
+    # Variable de salaire de reference, par ordre de preference. Doit rester
+    # alignee sur celle de l'etape 04 (calcul de S_IJT) et de l'etape 10
+    # (estimation) : si l'agregat entreprise et S_IJT reposaient sur des
+    # variables differentes, S_IJT pourrait valoir 1 alors que le salaire
+    # agrege est nul sur la meme ligne.
+    #
+    # SALAIRE_BRUT_ESTIME_AU_MOIS est prefere a SALAIRE_BRUT_MENS : il traite
+    # chaque periodicite avec sa propre conversion et ne depend pas de
+    # DUREE_TRAVAILLEE, incoherente sur 69% des horaires (audit 28/07/2026).
+    _salary_candidates = [
+        c for c in ("SALAIRE_BRUT_ESTIME_AU_MOIS", "SALAIRE_BRUT_MENS", "SALAIRE_BRUT")
+        if c in df.columns
+    ]
+    salary_col = _salary_candidates[0] if _salary_candidates else "SALAIRE_BRUT"
     logger.info("Colonne de salaire retenue pour l'agregation : {}", salary_col)
 
     agg_exprs = [pl.len().alias("EFFECTIF_OBSERVE")]

@@ -142,7 +142,15 @@ def calculer_poids_finaux(cfg: PipelineConfig) -> str:
     logger.info("Calcul des poids finaux avec la methode : {} ({} lignes)", method, df.height)
 
     if method == "aipw" and "P_HAT_JT" in df.columns:
-        salary_col = "SALAIRE_BRUT_MENS" if "SALAIRE_BRUT_MENS" in df.columns else "SALAIRE_BRUT"
+        # Meme variable de reference que les etapes 04, 05 et 10 (cf. commentaire
+        # de 05_base_entreprises.py) : SALAIRE_BRUT_ESTIME_AU_MOIS traite chaque
+        # periodicite avec sa propre conversion et ne depend pas de
+        # DUREE_TRAVAILLEE.
+        salary_col = next(
+            (c for c in ("SALAIRE_BRUT_ESTIME_AU_MOIS", "SALAIRE_BRUT_MENS", "SALAIRE_BRUT")
+             if c in df.columns),
+            "SALAIRE_BRUT",
+        )
 
         if salary_col in df.columns and "P_HAT_JT" in df.columns:
             y_obs = df[salary_col].fill_null(0).to_numpy()

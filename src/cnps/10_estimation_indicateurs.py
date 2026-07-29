@@ -514,7 +514,10 @@ def estimer_indicateurs(cfg: PipelineConfig) -> pl.DataFrame:
     analytical_object = f"{cfg.minio.cleaned_prefix}analytical_base.parquet"
     imputed_object = f"{cfg.minio.cleaned_prefix}firm_base_imputed.parquet"
 
-    salary_col = "SALAIRE_BRUT_MENS"
+    # Variable de salaire de reference, alignee sur les etapes 04 (S_IJT) et 05
+    # (agregation entreprise) : voir le commentaire de 05_base_entreprises.py.
+    # Resolue plus bas contre les colonnes reellement presentes.
+    salary_col = "SALAIRE_BRUT_ESTIME_AU_MOIS"
     weight_col = "W_FINAL"
     min_cell = cfg.estimation.min_cell_size
     statistics = cfg.statistics
@@ -524,6 +527,19 @@ def estimer_indicateurs(cfg: PipelineConfig) -> pl.DataFrame:
 
     if not object_exists(cfg.minio, bucket, analytical_object):
         raise FileNotFoundError(f"Base analytique introuvable : {bucket}/{analytical_object}")
+
+    df = read_parquet(cfg.minio, bucket, analytical_object)
+
+    # Resolution de la colonne de salaire AVANT l'aiguillage, pour que les deux
+    # chemins (avec ou sans imputations) utilisent la meme variable.
+    if salary_col not in df.columns:
+        fallback = next(
+            (c for c in ("SALAIRE_BRUT_MENS", "SALAIRE_BRUT") if c in df.columns), None
+        )
+        if fallback is None:
+            raise ValueError("Aucune colonne de salaire trouvee dans la base analytique")
+        logger.info("Colonne '{}' absente, repli sur '{}'", salary_col, fallback)
+        salary_col = fallback
 
     # L'estimation part toujours de la base analytique (niveau individuel,
     # porteuse de W_FINAL). Les imputations de l'etape 08 y sont jointes plutot
@@ -535,17 +551,8 @@ def estimer_indicateurs(cfg: PipelineConfig) -> pl.DataFrame:
             min_cell, statistics, enabled_dims,
         )
 
-    df = read_parquet(cfg.minio, bucket, analytical_object)
-
-    if salary_col not in df.columns:
-        fallback = "SALAIRE_BRUT" if "SALAIRE_BRUT" in df.columns else None
-        if fallback is None:
-            raise ValueError("Aucune colonne de salaire trouvee dans la base analytique")
-        logger.info("Colonne '{}' absente, repli sur '{}'", salary_col, fallback)
-        salary_col = fallback
-
-    logger.info("Estimation de {} statistiques sur {} dimensions ({} lignes)",
-                len(statistics), len(enabled_dims), df.height)
+    logger.info("Estimation de {} statistiques sur {} dimensions ({} lignes, salaire '{}')",
+                len(statistics), len(enabled_dims), df.height, salary_col)
 
     all_rows: list[dict] = []
     n_suppressed = 0
