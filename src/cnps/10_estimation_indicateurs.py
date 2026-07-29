@@ -307,17 +307,101 @@ def _estimate_dimension(
     return rows
 
 
+def _joindre_imputation_sur_individus(
+    analytical: pl.DataFrame,
+    imputed_m: pl.DataFrame,
+    salary_col: str,
+) -> tuple[pl.DataFrame, str]:
+    """
+    Reporte le salaire moyen impute d'une imputation ``m`` sur les lignes
+    individuelles, et construit la variable de salaire a estimer.
+
+    Regle : pour un salarie dont le salaire est reellement declare, on garde sa
+    valeur observee. Pour les autres, on utilise le salaire moyen de son
+    entreprise ce mois-la -- observe si l'entreprise a declare, impute par
+    l'etape 08 sinon. Substituer une valeur imputee a un salaire observe serait
+    une perte d'information ; c'est exactement ce que l'annexe 3 reproche a
+    l'annexe 2 sur les declarations partielles.
+
+    Returns
+    -------
+    (DataFrame, str)
+        La base enrichie et le nom de la colonne de salaire a utiliser.
+    """
+    join_cols = [
+        c for c in ("ID_EMPLOYEUR", "PERIOD")
+        if c in analytical.columns and c in imputed_m.columns
+    ]
+    if len(join_cols) < 2 or "SALAIRE_MOYEN" not in imputed_m.columns:
+        logger.warning(
+            "Jointure impossible sur les imputations (cles={}, SALAIRE_MOYEN={}). "
+            "Estimation sur le salaire observe uniquement.",
+            join_cols, "SALAIRE_MOYEN" in imputed_m.columns,
+        )
+        return analytical, salary_col
+
+    df = analytical.join(
+        imputed_m.select(join_cols + ["SALAIRE_MOYEN"]).rename(
+            {"SALAIRE_MOYEN": "_SAL_MOYEN_IMP"}
+        ),
+        on=join_cols,
+        how="left",
+    )
+
+    observe = (
+        pl.col(salary_col).is_not_null() & (pl.col(salary_col) > 0)
+        if salary_col in df.columns
+        else pl.lit(False)
+    )
+    df = df.with_columns(
+        pl.when(observe)
+        .then(pl.col(salary_col))
+        .otherwise(pl.col("_SAL_MOYEN_IMP"))
+        .alias("_SALAIRE_ESTIME")
+    ).drop("_SAL_MOYEN_IMP")
+
+    return df, "_SALAIRE_ESTIME"
+
+
 def _estimate_with_imputations(
     cfg: PipelineConfig,
     imputed_object: str,
+    analytical_object: str,
     salary_col: str,
     weight_col: str,
     min_cell: int,
     statistics: list[StatDef],
     enabled_dims: list[DimensionDef],
 ) -> pl.DataFrame:
-    """Estime avec combinaison de Rubin sur les imputations multiples."""
+    """
+    Estime avec combinaison de Rubin sur les imputations multiples.
+
+    L'estimation se fait au niveau **individuel** (base analytique), pondere par
+    ``W_FINAL`` = W_JT x W_INDIV, et non au niveau entreprise.
+
+    Pourquoi : ``firm_base_imputed`` est agrege par entreprise-mois et ne porte
+    ni ``W_FINAL``, ni ``W_INDIV``, ni ``S_IJT``. Estimer directement dessus
+    reviendrait a ignorer le second etage de l'annexe 3 (la correction de la
+    non-declaration partielle, etape 07b) et a retomber sur une ponderation
+    ``W_JT`` seule, c'est-a-dire sur l'annexe 2 -- alors que 65,3% des salaires
+    manquants sont justement dans des entreprises ayant declare partiellement.
+    Les salaires imputes sont donc **joints** sur les lignes individuelles
+    plutot que d'etre estimes tels quels.
+    """
     imputed = read_parquet(cfg.minio, cfg.minio.cleaned_bucket, imputed_object)
+    analytical = read_parquet(cfg.minio, cfg.minio.cleaned_bucket, analytical_object)
+
+    if weight_col not in analytical.columns:
+        fallback_w = "W_JT" if "W_JT" in analytical.columns else None
+        logger.warning(
+            "Colonne de poids '{}' absente de la base analytique : repli sur '{}'. "
+            "Verifier que l'etape 09 a bien ete executee.",
+            weight_col, fallback_w or "1.0",
+        )
+        if fallback_w:
+            weight_col = fallback_w
+        else:
+            analytical = analytical.with_columns(pl.lit(1.0).alias(weight_col))
 
     if "IMPUTATION_ID" not in imputed.columns:
         logger.warning("Aucun IMPUTATION_ID trouve, traite comme imputation unique")
@@ -325,24 +409,33 @@ def _estimate_with_imputations(
 
     m_values = sorted(imputed["IMPUTATION_ID"].unique().to_list())
     M = len(m_values)
-    logger.info("Combinaison de {} imputations via les regles de Rubin", M)
+    logger.info(
+        "Combinaison de {} imputations via les regles de Rubin, au niveau individuel "
+        "({} lignes, poids '{}')",
+        M, analytical.height, weight_col,
+    )
 
     imputation_results: list[list[dict]] = []
 
     for m in m_values:
-        df_m = imputed.filter(pl.col("IMPUTATION_ID") == m)
+        imputed_m = imputed.filter(pl.col("IMPUTATION_ID") == m)
+        df_m, s_col = _joindre_imputation_sur_individus(analytical, imputed_m, salary_col)
 
-        s_col = salary_col if salary_col in df_m.columns else "SALAIRE_MOYEN"
         if s_col not in df_m.columns:
+            logger.warning("Imputation {} : aucune colonne de salaire exploitable", m)
             continue
 
-        w_col = weight_col if weight_col in df_m.columns else "W_JT"
-        if w_col not in df_m.columns:
-            df_m = df_m.with_columns(pl.lit(1.0).alias(w_col))
+        n_estimables = int(df_m[s_col].is_not_null().sum())
+        logger.debug(
+            "Imputation {}/{} : {} lignes avec salaire (observe ou impute) sur {}",
+            m, M, n_estimables, df_m.height,
+        )
 
         rows_m: list[dict] = []
         for dim in enabled_dims:
-            rows_m.extend(_estimate_dimension(df_m, dim, s_col, w_col, statistics, min_cell))
+            rows_m.extend(
+                _estimate_dimension(df_m, dim, s_col, weight_col, statistics, min_cell)
+            )
 
         imputation_results.append(rows_m)
 
@@ -429,14 +522,18 @@ def estimer_indicateurs(cfg: PipelineConfig) -> pl.DataFrame:
 
     logger.info("Taille minimale de cellule (secret statistique) : {}", min_cell)
 
+    if not object_exists(cfg.minio, bucket, analytical_object):
+        raise FileNotFoundError(f"Base analytique introuvable : {bucket}/{analytical_object}")
+
+    # L'estimation part toujours de la base analytique (niveau individuel,
+    # porteuse de W_FINAL). Les imputations de l'etape 08 y sont jointes plutot
+    # que d'etre estimees a leur propre niveau -- cf. _estimate_with_imputations.
     if object_exists(cfg.minio, bucket, imputed_object):
         logger.info("Imputations multiples detectees, utilisation des regles de Rubin")
         return _estimate_with_imputations(
-            cfg, imputed_object, salary_col, weight_col, min_cell, statistics, enabled_dims,
+            cfg, imputed_object, analytical_object, salary_col, weight_col,
+            min_cell, statistics, enabled_dims,
         )
-
-    if not object_exists(cfg.minio, bucket, analytical_object):
-        raise FileNotFoundError(f"Base analytique introuvable : {bucket}/{analytical_object}")
 
     df = read_parquet(cfg.minio, bucket, analytical_object)
 

@@ -78,6 +78,10 @@ _NUMERIC_FEATURES = [
     # modele cherche a expliquer).
     "TAUX_DECLARATION_PASSE_INDIV",
     "S_IJT_LAG",
+    # Contexte organisationnel (Z_jt de l'annexe 3) : une entreprise qui declare
+    # habituellement 30% de ses salaries n'a pas le meme comportement qu'une
+    # autre a 95%. Calcule ci-dessous a partir de EFFECTIF_DECLARE (etape 05).
+    "TAUX_COMPLETUDE_ENTREPRISE",
 ]
 
 
@@ -122,6 +126,36 @@ def _ajouter_historique_individuel(df: pl.DataFrame) -> pl.DataFrame:
         .alias("TAUX_DECLARATION_PASSE_INDIV"),
     )
     logger.info("Historique individuel calcule : S_IJT_LAG, TAUX_DECLARATION_PASSE_INDIV")
+
+    # --- Contexte organisationnel : completude habituelle de l'entreprise ---
+    # ATTENTION : le taux de completude du mois COURANT contient directement
+    # l'information a predire (si l'entreprise declare 100% de ses salaries,
+    # alors S_IJT = 1 par construction). On le decale donc d'un mois : c'est le
+    # comportement PASSE de l'employeur qui sert de covariable, jamais celui du
+    # mois estime.
+    if {"EFFECTIF_DECLARE", "EFFECTIF_OBSERVE", "ID_EMPLOYEUR"} <= set(df.columns):
+        df = df.sort([c for c in ("ID_EMPLOYEUR", "PERIOD", "ANNEE", "MOIS") if c in df.columns])
+        df = df.with_columns(
+            (
+                pl.col("EFFECTIF_DECLARE").cast(pl.Float64)
+                / pl.col("EFFECTIF_OBSERVE").cast(pl.Float64)
+            )
+            .shift(1)
+            .over("ID_EMPLOYEUR")
+            .fill_null(0.0)
+            .fill_nan(0.0)
+            .alias("TAUX_COMPLETUDE_ENTREPRISE")
+        )
+        logger.info(
+            "Contexte entreprise calcule : TAUX_COMPLETUDE_ENTREPRISE "
+            "(completude du mois precedent, decalee pour eviter toute fuite)"
+        )
+    else:
+        logger.info(
+            "EFFECTIF_DECLARE/EFFECTIF_OBSERVE absents : TAUX_COMPLETUDE_ENTREPRISE "
+            "non calcule (l'etape 05 doit avoir ete rejouee)."
+        )
+
     return df
 
 

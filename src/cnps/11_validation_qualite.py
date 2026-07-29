@@ -169,6 +169,34 @@ def valider_modeles(cfg: PipelineConfig) -> ValidationReport:
             "WARNING", "model", "no_declaration_model", "Modele de declaration introuvable",
         ))
 
+    # --- Modele de declaration individuelle q_ijt (etape 07b, annexe 3) ---
+    # Sans ce controle, une AUC insuffisante sur le second etage passerait
+    # inapercue alors qu'elle concerne 65,3% des salaires manquants.
+    decl_indiv_object = f"{cfg.minio.models_prefix}declaration_indiv_model.pkl"
+    if object_exists(cfg.minio, models_bucket, decl_indiv_object):
+        model_data = read_pickle(cfg.minio, models_bucket, decl_indiv_object)
+        auc_indiv = model_data.get("auc", 0)
+        taux = model_data.get("taux_declare")
+        if auc_indiv < cfg.modeling.min_auc:
+            report.issues.append(ValidationIssue(
+                "WARNING", "model", "low_auc_indiv",
+                f"AUC du modele de declaration individuelle={auc_indiv:.4f} "
+                f"< {cfg.modeling.min_auc} : les poids W_INDIV corrigent mal la "
+                "non-declaration partielle, enrichir les covariables",
+            ))
+        else:
+            report.issues.append(ValidationIssue(
+                "INFO", "model", "auc_indiv_ok",
+                f"AUC du modele de declaration individuelle={auc_indiv:.4f}"
+                + (f" (taux de declaration observe={taux:.2%})" if taux else ""),
+            ))
+    else:
+        report.issues.append(ValidationIssue(
+            "WARNING", "model", "no_declaration_indiv_model",
+            "Modele de declaration individuelle introuvable : l'etape 07b n'a pas "
+            "ete executee, le second etage de l'annexe 3 est inactif (W_INDIV=1)",
+        ))
+
     imp_object = f"{cfg.minio.models_prefix}imputation_model.pkl"
     if object_exists(cfg.minio, models_bucket, imp_object):
         model_data = read_pickle(cfg.minio, models_bucket, imp_object)

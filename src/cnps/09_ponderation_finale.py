@@ -160,7 +160,27 @@ def calculer_poids_finaux(cfg: PipelineConfig) -> str:
                 cfg.modeling.ipw_trim_lower, cfg.modeling.ipw_trim_upper,
             )
 
-            df = df.with_columns(pl.Series("W_FINAL", w_aipw))
+            # L'AIPW corrige la non-declaration au niveau ENTREPRISE (p_jt) : il
+            # remplace W_JT, pas W_INDIV. Le second etage de l'annexe 3 (q_ijt,
+            # non-declaration partielle a l'interieur des entreprises
+            # declarantes) reste a appliquer par-dessus, sans quoi la correction
+            # portant sur 65,3% des salaires manquants serait perdue.
+            df = df.with_columns(pl.Series("_W_AIPW", w_aipw))
+            if "W_INDIV" in df.columns:
+                df = df.with_columns(
+                    (pl.col("_W_AIPW") * pl.col("W_INDIV")).alias("W_FINAL")
+                )
+                logger.info(
+                    "AIPW (etage entreprise) compose avec W_INDIV (etage individuel) : "
+                    "W_FINAL = W_AIPW x W_INDIV"
+                )
+            else:
+                df = df.with_columns(pl.col("_W_AIPW").alias("W_FINAL"))
+                logger.warning(
+                    "W_INDIV absent : W_FINAL = W_AIPW seul. Le second etage de "
+                    "l'annexe 3 n'est pas applique (etape 07b executee ?)."
+                )
+            df = df.drop("_W_AIPW")
             logger.info("Estimation AIPW du salaire moyen : {:.0f} FCFA", mu_aipw)
         else:
             logger.warning("Colonnes manquantes pour AIPW, repli sur IPW standard")
