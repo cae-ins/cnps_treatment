@@ -188,51 +188,6 @@ def _check_doublons(data: list[tuple[str, int, int, pl.DataFrame]]) -> pl.DataFr
     return pl.DataFrame(rows)
 
 
-def _check_colonnes(data: list[tuple[str, int, int, pl.DataFrame]]) -> pl.DataFrame:
-    """2. Coherence des colonnes — chaque fichier compare au premier (reference)."""
-    if not data:
-        return pl.DataFrame()
-    ref_cols = set(data[0][3].columns)
-    rows = []
-    for fname, mois, annee, df in data:
-        file_cols = set(df.columns)
-        rows.append({
-            "fichier": fname,
-            "ANNEE": annee,
-            "MOIS": mois,
-            "colonnes_manquantes": ", ".join(sorted(ref_cols - file_cols)) or "",
-            "colonnes_en_plus": ", ".join(sorted(file_cols - ref_cols)) or "",
-        })
-    return pl.DataFrame(rows)
-
-
-def _check_types(data: list[tuple[str, int, int, pl.DataFrame]]) -> pl.DataFrame:
-    """3. Incoherences de type entre fichiers (vs reference)."""
-    if not data:
-        return pl.DataFrame()
-    ref_types = {col: str(dtype) for col, dtype in zip(data[0][3].columns, data[0][3].dtypes)}
-    rows = []
-    for fname, mois, annee, df in data:
-        file_types = {col: str(dtype) for col, dtype in zip(df.columns, df.dtypes)}
-        common = set(ref_types) & set(file_types)
-        for var in sorted(common):
-            if file_types[var] != ref_types[var]:
-                rows.append({
-                    "fichier": fname,
-                    "ANNEE": annee,
-                    "MOIS": mois,
-                    "variable": var,
-                    "type_fichier": file_types[var],
-                    "type_reference": ref_types[var],
-                })
-    if not rows:
-        return pl.DataFrame(schema={
-            "fichier": pl.Utf8, "ANNEE": pl.Int64, "MOIS": pl.Int64,
-            "variable": pl.Utf8, "type_fichier": pl.Utf8, "type_reference": pl.Utf8,
-        })
-    return pl.DataFrame(rows)
-
-
 def _check_valeurs_manquantes(data: list[tuple[str, int, int, pl.DataFrame]]) -> pl.DataFrame:
     """4. Compte des valeurs manquantes par variable et par fichier."""
     rows = []
@@ -490,6 +445,143 @@ def _ajouter_salaire_mensuel(
         .otherwise(pl.col(salary_var))
         .alias("_SAL_MENS")
     )
+
+
+def _check_comparatif_periodicite(
+    data: list[tuple[str, int, int, pl.DataFrame]],
+    salary_var: str = "SALAIRE_BRUT",
+    type_var: str = "TYPE_SALARIE",
+    duree_var: str = "DUREE_TRAVAILLEE",
+    smig_mensuel: float = 75_000.0,
+) -> pl.DataFrame:
+    """
+    Comparatif des periodicites declarees, agrege sur toute la periode.
+
+    Justifie le choix d'inclure ou d'exclure chaque type de salarie
+    (``cleaning.exclude_employee_types``). La feuille ``Analyse_Salaire``
+    contient les memes mesures, mais ventilees par fichier et par mois : sur
+    23 mois, la comparaison entre periodicites y est illisible. Ici, une ligne
+    par periodicite, sur l'ensemble de l'historique.
+
+    Trois indicateurs decident :
+
+    - ``pct_confusion_unite`` : montant incompatible avec la periodicite
+      declaree (ex. un taux horaire de 200 000, ou un salaire mensuel de 500).
+    - ``pct_duree_incoherente`` : ``DUREE_TRAVAILLEE`` hors de la plage
+      plausible pour cette periodicite. C'est l'indicateur le plus discriminant :
+      une duree incoherente rend le montant ininterpretable, donc non convertible.
+    - ``pct_sous_seuil`` : montant sous le seuil de plausibilite derive du SMIG
+      pour cette periodicite.
+
+    Lecture : un type dont la majorite des lignes est incoherente ne peut pas
+    etre converti de facon fiable -- la conversion (x26 ou x208) amplifierait
+    l'erreur au lieu de la corriger. Un type dont les durees sont saines peut
+    l'etre, meme si le taux de "confusion" parait eleve (l'heuristique de
+    confusion produit des faux positifs : un journalier bien paye ressemble a
+    un mensuel mal paye).
+    """
+    schema_vide = {
+        "periodicite": pl.Utf8, "code": pl.Utf8, "nb_lignes": pl.Int64,
+        "pct_des_salaires_renseignes": pl.Float64, "salaire_median_declare": pl.Float64,
+        "equivalent_mensuel_median": pl.Float64, "nb_confusion_unite": pl.Int64,
+        "pct_confusion_unite": pl.Float64, "nb_duree_incoherente": pl.Int64,
+        "pct_duree_incoherente": pl.Float64, "nb_sous_seuil": pl.Int64,
+        "pct_sous_seuil": pl.Float64, "seuil_plausible": pl.Float64,
+    }
+
+    colonnes = [c for c in (salary_var, type_var, duree_var) if c]
+    df = _concat_periodes(data, colonnes)
+    if df is None:
+        df = _concat_periodes(data, [salary_var, type_var])
+        duree_var = ""
+    if df is None:
+        return pl.DataFrame(schema=schema_vide)
+
+    df = df.filter(pl.col(salary_var).is_not_null() & (pl.col(salary_var) > 0))
+    if df.height == 0:
+        return pl.DataFrame(schema=schema_vide)
+
+    n_total = df.height
+    seuils = {
+        "M": smig_mensuel,
+        "J": smig_mensuel / _JOURS_OUVRES_PAR_MOIS,
+        "H": smig_mensuel / _HEURES_PAR_MOIS,
+    }
+    facteurs = {"M": 1, "J": _JOURS_OUVRES_PAR_MOIS, "H": _HEURES_PAR_MOIS}
+    # Plage plausible de DUREE_TRAVAILLEE selon l'unite attendue : des mois
+    # pour un mensuel, des jours pour un journalier, des heures pour un horaire.
+    durees_max = {"M": 12, "J": 31, "H": 744}  # 744 = 31 j x 24 h
+
+    rows = []
+    for code in ("M", "J", "H"):
+        sous = df.filter(pl.col(type_var) == code)
+        n = sous.height
+        if n == 0:
+            continue
+
+        seuil = seuils[code]
+        sal = sous[salary_var]
+        median_declare = float(sal.median()) if n else None
+        median_mensuel = median_declare * facteurs[code] if median_declare else None
+
+        # Confusion d'unite : le montant ressemble a une autre periodicite.
+        # Un mensuel sous le seuil journalier, ou un taux J/H depassant le
+        # seuil mensuel, sont suspects.
+        if code == "M":
+            confusion = sous.filter(pl.col(salary_var) < seuils["J"]).height
+        else:
+            confusion = sous.filter(pl.col(salary_var) >= smig_mensuel).height
+
+        n_sous_seuil = sous.filter(pl.col(salary_var) < seuil).height
+
+        if duree_var and duree_var in sous.columns:
+            n_duree = sous.filter(
+                pl.col(duree_var).is_not_null()
+                & ((pl.col(duree_var) <= 0) | (pl.col(duree_var) > durees_max[code]))
+            ).height
+        else:
+            n_duree = None
+
+        rows.append({
+            "periodicite": _LABEL_PERIODICITE.get(code, code),
+            "code": code,
+            "nb_lignes": n,
+            "pct_des_salaires_renseignes": round(n / n_total * 100, 2),
+            "salaire_median_declare": round(median_declare, 2) if median_declare else None,
+            "equivalent_mensuel_median": round(median_mensuel, 2) if median_mensuel else None,
+            "nb_confusion_unite": confusion,
+            "pct_confusion_unite": round(confusion / n * 100, 2),
+            "nb_duree_incoherente": n_duree,
+            "pct_duree_incoherente": round(n_duree / n * 100, 2) if n_duree is not None else None,
+            "nb_sous_seuil": n_sous_seuil,
+            "pct_sous_seuil": round(n_sous_seuil / n * 100, 2),
+            "seuil_plausible": round(seuil, 2),
+        })
+
+    # Lignes a periodicite non renseignee : traitees comme mensuelles par la
+    # conversion, hypothese silencieuse qu'il faut pouvoir chiffrer.
+    sans_type = df.filter(pl.col(type_var).is_null())
+    if sans_type.height:
+        rows.append({
+            "periodicite": "NON RENSEIGNE (traite comme Mensuel)",
+            "code": "",
+            "nb_lignes": sans_type.height,
+            "pct_des_salaires_renseignes": round(sans_type.height / n_total * 100, 2),
+            "salaire_median_declare": round(float(sans_type[salary_var].median()), 2),
+            "equivalent_mensuel_median": round(float(sans_type[salary_var].median()), 2),
+            "nb_confusion_unite": None, "pct_confusion_unite": None,
+            "nb_duree_incoherente": None, "pct_duree_incoherente": None,
+            "nb_sous_seuil": sans_type.filter(pl.col(salary_var) < smig_mensuel).height,
+            "pct_sous_seuil": round(
+                sans_type.filter(pl.col(salary_var) < smig_mensuel).height
+                / sans_type.height * 100, 2
+            ),
+            "seuil_plausible": smig_mensuel,
+        })
+
+    if not rows:
+        return pl.DataFrame(schema=schema_vide)
+    return pl.DataFrame(rows, schema_overrides=schema_vide)
 
 
 def _check_couverture_declaration(
@@ -973,6 +1065,183 @@ def _check_changement_employeur(
     )
 
 
+def _build_synthese_methodologie(
+    *,
+    declaration_entreprise: pl.DataFrame,
+    comparatif_periodicite: pl.DataFrame,
+    non_declarants: pl.DataFrame,
+    changement_employeur: pl.DataFrame,
+    couverture_declaration: pl.DataFrame,
+) -> pl.DataFrame:
+    """
+    Synthese : chaque decision methodologique, le chiffre qui la justifie, et
+    la feuille ou le verifier.
+
+    Les valeurs sont **relues depuis les autres controles** de ce meme
+    classeur, jamais codees en dur : si les donnees changent, la justification
+    suit. Une decision dont le chiffre ne serait plus verifie doit etre
+    rediscutee, pas maintenue par habitude.
+    """
+    def _pct(df: pl.DataFrame, filtre: pl.Expr, col: str) -> float | None:
+        if df.height == 0 or col not in df.columns:
+            return None
+        sous = df.filter(filtre)
+        return float(sous[col][0]) if sous.height else None
+
+    lignes: list[dict] = []
+
+    # --- 1. Annexe 2 ou annexe 3 ---
+    pct_partielle = _pct(
+        declaration_entreprise,
+        pl.col("categorie") == "DECLARATION_PARTIELLE",
+        "pct_des_salaries_manquants",
+    )
+    lignes.append({
+        "decision": "Traitement en DEUX etages (annexe 3) plutot qu'un seul (annexe 2)",
+        "justification": (
+            f"{pct_partielle:.1f}% des salaires manquants sont dans des entreprises "
+            "qui ont pourtant declare ce mois-la. L'annexe 2 ne sait pas representer "
+            "ce cas (elle suppose qu'une entreprise declare tout ou rien) et "
+            "traiterait ces manquants comme une absence totale, en ignorant les "
+            "salaires reellement observes chez le meme employeur."
+            if pct_partielle is not None else "Mesure indisponible"
+        ),
+        "valeur_mesuree": f"{pct_partielle:.1f}%" if pct_partielle is not None else "n/d",
+        "seuil_de_decision": "Marginal (<5%) -> annexe 2 suffirait",
+        "feuille_de_verification": "Declaration_Entreprise",
+    })
+
+    # --- 2. Exclusion des horaires ---
+    def _periodicite(code: str, col: str) -> float | None:
+        return _pct(comparatif_periodicite, pl.col("code") == code, col)
+
+    duree_h = _periodicite("H", "pct_duree_incoherente")
+    duree_j = _periodicite("J", "pct_duree_incoherente")
+    vol_h = _periodicite("H", "pct_des_salaires_renseignes")
+    lignes.append({
+        "decision": "Exclure les salaries HORAIRES (cleaning.exclude_employee_types)",
+        "justification": (
+            f"{duree_h:.1f}% des lignes horaires ont une DUREE_TRAVAILLEE "
+            "incoherente : le montant declare n'est pas interpretable, et la "
+            "conversion en equivalent mensuel (x208) amplifierait l'erreur au lieu "
+            f"de la corriger. Ces lignes ne pesent que {vol_h:.1f}% des salaires "
+            "renseignes."
+            if duree_h is not None else "Mesure indisponible"
+        ),
+        "valeur_mesuree": f"{duree_h:.1f}% de durees incoherentes" if duree_h is not None else "n/d",
+        "seuil_de_decision": "Une majorite de lignes incoherentes rend le type inexploitable",
+        "feuille_de_verification": "Comparatif_Periodicite",
+    })
+
+    # --- 3. Maintien des journaliers ---
+    lignes.append({
+        "decision": "CONSERVER les salaries JOURNALIERS, convertis x26",
+        "justification": (
+            f"Seulement {duree_j:.2f}% de durees incoherentes : la conversion repose "
+            "sur une base fiable, contrairement aux horaires. Les exclure biaiserait "
+            "la representativite vers les seuls emplois stables."
+            if duree_j is not None else "Mesure indisponible"
+        ),
+        "valeur_mesuree": f"{duree_j:.2f}% de durees incoherentes" if duree_j is not None else "n/d",
+        "seuil_de_decision": "Durees saines -> conversion legitime",
+        "feuille_de_verification": "Comparatif_Periodicite",
+    })
+
+    # --- 4. Pas d'imputation par continuite individuelle ---
+    if changement_employeur.height:
+        chg = changement_employeur.filter(
+            pl.col("changement_employeur").str.starts_with("OUI")
+        )
+        same = changement_employeur.filter(
+            pl.col("changement_employeur").str.starts_with("NON")
+        )
+        var_chg = float(chg["variation_abs_mediane_pct"][0]) if chg.height else None
+        var_same = float(same["variation_abs_mediane_pct"][0]) if same.height else None
+    else:
+        var_chg = var_same = None
+    lignes.append({
+        "decision": (
+            "NE PAS imputer un salaire manquant par report d'un autre mois du "
+            "meme individu (backward/forward)"
+        ),
+        "justification": (
+            f"Lors d'un changement d'employeur, la variation mediane du salaire est "
+            f"de {var_chg:.1f}% contre {var_same:.1f}% a employeur constant. Reporter "
+            "le salaire d'avant transporterait celui de l'ancien poste. Surtout, "
+            "pre-remplir des manquants transforme des non-declarants en declarants "
+            "aux yeux du modele de propension : les poids IPW seraient sous-estimes "
+            "et la correction du biais echouerait silencieusement."
+            if var_chg is not None and var_same is not None else "Mesure indisponible"
+        ),
+        "valeur_mesuree": (
+            f"{var_chg:.1f}% vs {var_same:.1f}%" if var_chg is not None else "n/d"
+        ),
+        "seuil_de_decision": "Ecart important -> le report individuel n'est pas neutre",
+        "feuille_de_verification": "Changement_Employeur",
+    })
+
+    # --- 5. Perimetre non imputable ---
+    pct_jamais = _pct(
+        non_declarants, pl.col("perimetre") == "TOUTES_PERIODES", "pct_jamais_declarant"
+    )
+    lignes.append({
+        "decision": (
+            "Reconnaitre un perimetre NON imputable par continuite individuelle"
+        ),
+        "justification": (
+            f"{pct_jamais:.1f}% des individus eligibles n'ont aucun salaire declare "
+            "sur toute la periode observee : aucune valeur du meme individu n'existe "
+            "pour servir de base a un report. Ils relevent de l'imputation au niveau "
+            "entreprise (etape 08)."
+            if pct_jamais is not None else "Mesure indisponible"
+        ),
+        "valeur_mesuree": f"{pct_jamais:.1f}%" if pct_jamais is not None else "n/d",
+        "seuil_de_decision": "Perimetre a documenter dans toute publication",
+        "feuille_de_verification": "Non_Declarants",
+    })
+
+    # --- 6. Comptage a partir de la date d'embauche ---
+    n_mois = (
+        int(couverture_declaration["nb_mois_periode"][0])
+        if couverture_declaration.height and "nb_mois_periode" in couverture_declaration.columns
+        else None
+    )
+    lignes.append({
+        "decision": (
+            "Ne compter comme manquants que les mois POSTERIEURS a la date d'embauche"
+        ),
+        "justification": (
+            "Un mois anterieur a l'embauche n'est pas un defaut de declaration : le "
+            "salarie n'avait pas a y figurer. DATE_EMBAUCHE est renseignee a 100% "
+            "dans les fichiers sources, ce denominateur est donc fiable. Sans cette "
+            "regle, tout recrutement en cours de periode serait compte a tort comme "
+            "une non-declaration."
+        ),
+        "valeur_mesuree": f"{n_mois} mois observes" if n_mois else "n/d",
+        "seuil_de_decision": "Regle appliquee aux feuilles de couverture et de non-declaration",
+        "feuille_de_verification": "Couverture_Declaration",
+    })
+
+    # --- 7. Winsorisation apres conversion ---
+    lignes.append({
+        "decision": (
+            "Winsoriser APRES conversion de periodicite, sur l'equivalent mensuel"
+        ),
+        "justification": (
+            "Winsoriser le salaire brut reviendrait a calculer des percentiles sur "
+            "trois echelles incomparables (taux horaire, taux journalier, salaire "
+            "mensuel). La borne basse tombe alors dans la masse des taux horaires : "
+            "elle n'ecrete rien cote mensuel tout en remontant artificiellement les "
+            "taux. Apres conversion, toutes les lignes sont sur la meme echelle."
+        ),
+        "valeur_mesuree": "Ordre des operations (etape 03)",
+        "seuil_de_decision": "Prealable a toute comparaison de percentiles",
+        "feuille_de_verification": "Comparatif_Periodicite",
+    })
+
+    return pl.DataFrame(lignes)
+
+
 def _check_outliers(data: list[tuple[str, int, int, pl.DataFrame]],
                     variable: str = "SALAIRE_BRUT",
                     iqr_multiplier: float = 1.5,
@@ -1030,74 +1299,6 @@ def _check_outliers(data: list[tuple[str, int, int, pl.DataFrame]],
             "nb_outliers": pl.Int64, "pct_outliers": pl.Float64,
         })
     return pl.DataFrame(rows)
-
-
-def _check_unicite_id(data: list[tuple[str, int, int, pl.DataFrame]],
-                      id_var: str = "ID_INDIV") -> pl.DataFrame:
-    """6. Unicite de l'identifiant par fichier."""
-    rows = []
-    for fname, mois, annee, df in data:
-        if id_var not in df.columns:
-            rows.append({
-                "fichier": fname,
-                "ANNEE": annee,
-                "MOIS": mois,
-                "erreur": f"{id_var} absent",
-                "total_obs": df.height,
-                "nb_unique": None,
-                "nb_doublons": None,
-            })
-            continue
-        n_tot = df.height
-        n_unique = df[id_var].n_unique()
-        rows.append({
-            "fichier": fname,
-            "ANNEE": annee,
-            "MOIS": mois,
-            "erreur": "",
-            "total_obs": n_tot,
-            "nb_unique": n_unique,
-            "nb_doublons": n_tot - n_unique,
-        })
-    return pl.DataFrame(rows)
-
-
-def _check_top_doublons_id(data: list[tuple[str, int, int, pl.DataFrame]],
-                           id_var: str = "ID_INDIV",
-                           top_pct: float = 0.05) -> pl.DataFrame:
-    """7. Individus les plus dupliques par mois (top 5% par nombre d'occurrences)."""
-    frames = []
-    for fname, mois, annee, df in data:
-        if id_var not in df.columns:
-            continue
-
-        counts = (
-            df.group_by(id_var)
-            .agg(pl.len().alias("nb_occurrences"))
-            .filter(pl.col("nb_occurrences") > 1)
-            .sort("nb_occurrences", descending=True)
-        )
-
-        if counts.height == 0:
-            continue
-
-        n_keep = max(1, int(counts.height * top_pct))
-        top = counts.head(n_keep)
-
-        top = top.with_columns(
-            pl.lit(fname).alias("fichier"),
-            pl.lit(annee).alias("ANNEE"),
-            pl.lit(mois).alias("MOIS"),
-        )
-        frames.append(top)
-
-    if not frames:
-        return pl.DataFrame(schema={
-            "fichier": pl.Utf8, "ANNEE": pl.Int64, "MOIS": pl.Int64,
-            id_var: pl.Utf8, "nb_occurrences": pl.UInt32,
-        })
-
-    return pl.concat(frames).select("fichier", "ANNEE", "MOIS", id_var, "nb_occurrences")
 
 
 def _check_transitions(data: list[tuple[str, int, int, pl.DataFrame]],
@@ -1229,187 +1430,164 @@ def _check_distribution(data: list[tuple[str, int, int, pl.DataFrame]]) -> pl.Da
 # dans l'ordre ou les feuilles apparaissent dans le classeur.
 _GUIDE_LECTURE: list[tuple[str, str, str]] = [
     (
-        "Doublons_lignes",
-        "Detecter les lignes strictement identiques (toutes colonnes confondues) "
-        "au sein d'un meme fichier mensuel.",
-        "Un pourcentage eleve indique un probleme d'extraction ou de doublon "
-        "d'import cote source ; ces lignes gonflent artificiellement les effectifs "
-        "si elles ne sont pas dedupliquees en amont.",
+        "Synthese_Methodologie",
+        "Recapituler chaque decision methodologique retenue, le chiffre mesure "
+        "qui la justifie, et la feuille de ce classeur ou le verifier. Les "
+        "valeurs sont relues depuis les autres controles a chaque execution : "
+        "elles ne sont jamais codees en dur.",
+        "C'est la feuille a lire en premier. Elle repond a la question « pourquoi "
+        "ce traitement plutot qu'un autre ? » en renvoyant systematiquement a une "
+        "mesure verifiable. Si un chiffre ne soutient plus la decision associee "
+        "lors d'une execution ulterieure, cette decision doit etre rediscutee et "
+        "non maintenue par habitude.",
     ),
     (
-        "Colonnes",
-        "Verifier que chaque fichier mensuel possede le meme jeu de colonnes que "
-        "le premier fichier de la serie (pris comme reference).",
-        "Une colonne manquante peut faire disparaitre silencieusement une "
-        "information dans les etapes suivantes du pipeline ; une colonne en plus "
-        "peut signaler un changement de format source a documenter.",
+        "Declaration_Entreprise",
+        "Classer chaque couple (entreprise, mois) selon la part de ses salaries "
+        "dont le salaire est renseigne : AUCUNE_DECLARATION (0%), "
+        "DECLARATION_PARTIELLE (entre 0 et 100% exclus) ou "
+        "DECLARATION_COMPLETE (100%). Seuls les salaries dont le mois suit la "
+        "DATE_EMBAUCHE sont comptes.",
+        "Cette feuille justifie le choix d'un traitement a DEUX etages "
+        "(probabilite que l'entreprise declare, puis probabilite que chaque "
+        "salarie le soit) plutot qu'a un seul. Lire en priorite "
+        "pct_des_salaries_manquants sur la ligne DECLARATION_PARTIELLE : c'est "
+        "la part des salaires manquants qui se trouve dans des entreprises ayant "
+        "pourtant declare ce mois-la. Un traitement a un seul etage ne sait pas "
+        "representer ce cas et traiterait ces manquants comme une absence "
+        "totale, en ignorant les salaires reellement observes chez le meme "
+        "employeur. Comparer aussi nb_entreprise_mois et nb_salaries_eligibles : "
+        "les declarations partielles sont peu nombreuses en couples mais "
+        "concentrent l'essentiel des salaries, car ce sont les grandes "
+        "entreprises.",
     ),
     (
-        "Types_variables",
-        "Comparer, pour chaque variable commune, le type de donnees (texte, "
-        "entier, decimal...) du fichier au type du fichier de reference.",
-        "Un type qui change d'un mois a l'autre (ex. colonne lue comme texte "
-        "un mois et comme nombre un autre) provoque des echecs ou des "
-        "conversions silencieuses lors de l'harmonisation en etape 02.",
+        "Comparatif_Periodicite",
+        "Comparer les periodicites declarees (Mensuel / Journalier / Horaire) "
+        "sur l'ensemble de la periode : volume, salaire median declare et son "
+        "equivalent mensuel, taux de confusion d'unite, taux de duree "
+        "travaillee incoherente, taux de montants sous le seuil de plausibilite.",
+        "Cette feuille justifie l'inclusion ou l'exclusion de chaque type de "
+        "salarie. L'indicateur decisif est pct_duree_incoherente : une duree "
+        "travaillee aberrante rend le montant ininterpretable, donc non "
+        "convertible en equivalent mensuel — la conversion (x26 ou x208) "
+        "amplifierait l'erreur au lieu de la corriger. Un taux eleve de "
+        "confusion d'unite est en revanche a nuancer : l'heuristique produit des "
+        "faux positifs, un journalier bien paye ressemblant a un mensuel mal "
+        "paye. La derniere ligne chiffre les salaires sans periodicite "
+        "renseignee, traites comme mensuels par defaut — hypothese silencieuse "
+        "qu'il faut connaitre.",
     ),
     (
-        "Valeurs_manquantes",
-        "Mesurer, pour chaque variable et chaque fichier, la part de valeurs "
-        "non renseignees.",
-        "Un taux de valeurs manquantes anormalement eleve ou qui augmente dans "
-        "le temps peut reveler un champ mal collecte ou une variable devenue "
-        "obsolete cote source.",
-    ),
-    (
-        "Outliers_Salaire",
-        "Reperer les valeurs extremes de SALAIRE_BRUT via la methode des "
-        "quartiles (IQR) : tout ce qui sort de [Q1 - 1.5*IQR, Q3 + 1.5*IQR]. "
-        "Calcule a la fois globalement (ligne 'TOUS') et separement pour "
-        "chaque periodicite declaree (M/J/H, cf. TYPE_SALARIE).",
-        "Une part importante de valeurs hors bornes peut signaler des erreurs "
-        "de saisie (salaires en centimes au lieu de francs, doubles zeros, "
-        "etc.) ou une population reellement heterogene a examiner au cas par cas. "
-        "Comparer les lignes par periodicite evite qu'un salaire journalier, "
-        "mecaniquement plus petit, ne soit compte a tort comme un outlier bas "
-        "dans une distribution dominee par des salaires mensuels.",
-    ),
-    (
-        "Unicite_ID",
-        "Verifier que l'identifiant individuel (ID_INDIV) n'apparait qu'une "
-        "seule fois par fichier mensuel.",
-        "Des doublons d'identifiant faussent tout calcul agrege par individu "
-        "(masse salariale, effectifs) : c'est un signal a traiter en priorite "
-        "avant toute analyse en aval.",
-    ),
-    (
-        "Top_doublons_ID",
-        "Lister, pour chaque mois, les 5% d'identifiants les plus souvent "
-        "dupliques.",
-        "Utile pour cibler l'investigation : plutot que de traiter tous les "
-        "doublons d'un coup, cette feuille pointe les cas les plus extremes, "
-        "souvent revelateurs d'un probleme structurel (ex. fusion d'etablissements).",
-    ),
-    (
-        "Distribution",
-        "Donner les statistiques descriptives (min, max, moyenne, mediane, "
-        "ecart-type, quantiles) de chaque variable numerique, par fichier.",
-        "Permet de suivre l'evolution des ordres de grandeur dans le temps et "
-        "de reperer une rupture (changement d'unite, de barème, de population) "
-        "entre deux mois consecutifs.",
-    ),
-    (
-        "Manquants_vs_Salaire",
-        "Comparer le taux de valeurs manquantes de chaque variable selon que "
-        "SALAIRE_BRUT est lui-meme renseigne ou non sur la meme ligne.",
-        "Un ecart important indique que l'absence de salaire n'est pas isolee : "
-        "les lignes sans salaire sont aussi mal remplies sur le reste, ce qui "
-        "oriente vers un probleme de saisie globale plutot qu'un champ "
-        "specifique.",
-    ),
-    (
-        "Transitions_ID",
-        "Mesurer, pour chaque paire de mois, la proportion d'identifiants du "
-        "mois d'origine retrouves dans le mois de destination.",
-        "Une retention faible d'un mois sur l'autre peut traduire un turnover "
-        "reel, mais aussi un probleme de generation d'identifiant si la chute "
-        "est brutale et generalisee sur toute une periode.",
-    ),
-    (
-        "Analyse_Salaire",
-        "Croiser SALAIRE_BRUT avec sa periodicite declaree (TYPE_SALARIE : "
-        "Mensuel/Journalier/Horaire) : seuil plausible derive du SMIG pour "
-        "chaque periodicite, salaires nuls/negatifs/sous ce seuil, et "
-        "confusions d'unite suspectees (ex. un taux journalier declare comme "
-        "salaire mensuel, ou l'inverse).",
-        "Une periodicite non renseignee empeche toute verification de "
-        "coherence du montant. Un volume important de confusions d'unite "
-        "suspectees pointe vers un probleme de saisie du formulaire cote "
-        "employeur plutot qu'une erreur isolee. Pour une exploration plus "
-        "fine (par secteur, taille d'entreprise, concentration par employeur "
-        "ou individu), voir le notebook analyse_incoherences_salaires.ipynb.",
+        "Changement_Employeur",
+        "Comparer l'ampleur de la variation de salaire d'un mois au suivant "
+        "selon que l'individu a change d'employeur ou non : mediane, quartiles, "
+        "part de ruptures fortes.",
+        "Cette feuille justifie le refus d'imputer un salaire manquant par "
+        "report d'un autre mois du meme individu. Les deux lignes se lisent "
+        "l'une par rapport a l'autre : une variation forte est attendue lors "
+        "d'un changement d'employeur, mais suspecte a employeur constant. Si "
+        "l'ecart est net, reporter le salaire d'avant sur un mois manquant "
+        "d'apres transporte le salaire de l'ancien poste. S'ajoute une raison "
+        "technique : pre-remplir des manquants transforme des non-declarants en "
+        "declarants aux yeux du modele de propension, ce qui sous-estime les "
+        "poids de correction et fait echouer silencieusement la correction du "
+        "biais.",
     ),
     (
         "Couverture_Declaration",
-        "Denombrer les personnes selon leur nombre de mois de salaire "
-        "manquant. Tous les fichiers mensuels sont concatenes en un seul bloc, "
-        "puis chaque ID_INDIV est examine sur toute la periode : parmi les "
-        "mois ou il aurait du etre declare (ceux posterieurs a sa "
-        "DATE_EMBAUCHE), combien n'ont pas de salaire renseigne. Une ligne par "
-        "nombre de mois manquants, une colonne d'effectif.",
+        "Denombrer les personnes selon leur nombre de mois de salaire manquant, "
+        "sur toute la periode d'un seul tenant. Une ligne par nombre de mois "
+        "manquants, une colonne d'effectif. Seuls les mois posterieurs a la "
+        "DATE_EMBAUCHE sont comptes.",
         "Lecture directe : filtrer sur nb_mois_manquants donne le nombre de "
-        "personnes concernees (ex. nb_mois_manquants = 1 -> nb_personnes = "
-        "combien de personnes n'ont qu'un seul mois manquant). Les colonnes "
-        "cumulees donnent le volume 'au plus N mois manquants'. "
-        "Deux points a savoir pour interpreter : un mois anterieur a "
-        "l'embauche n'est PAS compte comme manquant (l'individu n'avait pas a "
-        "y etre declare) — c'est ce que rappelle la colonne base_de_comptage ; "
-        "et un salaire ne compte comme declare que s'il est renseigne ET "
-        "strictement positif, une ligne a 0 n'etant pas une declaration "
-        "exploitable. La derniere ligne regroupe ceux qui n'ont jamais rien "
-        "declare (cf. feuille Non_Declarants).",
+        "personnes concernees ; les colonnes cumulees donnent le volume « au "
+        "plus N mois manquants ». Cette feuille dimensionne l'ampleur du "
+        "traitement a appliquer et justifie la regle de comptage : un mois "
+        "anterieur a l'embauche n'est pas un defaut de declaration, le salarie "
+        "n'avait pas a y figurer. Sans cette regle, tout recrutement en cours de "
+        "periode serait compte a tort comme une non-declaration.",
     ),
     (
         "Non_Declarants",
         "Denombrer les individus qui n'ont aucun salaire declare alors qu'ils "
         "etaient embauches : une ligne par annee, plus une ligne "
-        "TOUTES_PERIODES sur l'ensemble des mois charges. Seuls les individus "
-        "ayant au moins un mois posterieur a leur DATE_EMBAUCHE sont comptes "
-        "(colonne nb_individus_eligibles) — meme regle que la feuille "
-        "Couverture_Declaration, pour que les deux feuilles comptent la meme "
-        "chose. Sans mois eligible, il n'y a pas de declaration attendue, donc "
-        "pas de defaut a constater : l'ecart entre nb_individus_presents et "
-        "nb_individus_eligibles mesure ces individus-la.",
-        "La ligne TOUTES_PERIODES isole les individus reellement non imputables "
-        "par continuite individuelle : aucune valeur du meme individu n'existe "
-        "nulle part pour servir de base a un report backward/forward. Ils "
-        "relevent de l'imputation au niveau entreprise (etape 08) ou d'un "
-        "traitement dedie. Un individu jamais declarant une annee mais "
-        "declarant l'autre reste, lui, imputable a partir de l'autre annee : "
-        "c'est pourquoi les lignes annuelles et la ligne TOUTES_PERIODES ne se "
-        "somment pas, et que seule la seconde mesure l'impasse d'imputation. "
-        "Le pourcentage est calcule sur les eligibles, pas sur les presents.",
+        "TOUTES_PERIODES. Le pourcentage est calcule sur les individus "
+        "eligibles, pas sur les presents.",
+        "La ligne TOUTES_PERIODES delimite le perimetre qu'aucune methode de "
+        "continuite individuelle ne peut atteindre : ces individus n'ont aucune "
+        "valeur, nulle part, susceptible de servir de reference. Ils relevent "
+        "d'un traitement au niveau entreprise. Ce perimetre doit etre "
+        "explicitement documente dans toute publication. Les lignes annuelles et "
+        "la ligne globale ne se somment pas : un individu muet une annee mais "
+        "declarant l'autre reste rattrapable, d'ou un total inferieur a chaque "
+        "annee prise isolement.",
     ),
     (
-        "Changement_Employeur",
-        "Comparer l'ampleur de la variation de salaire d'un mois au suivant "
-        "selon que l'individu a change d'employeur ou non. Une ligne pour les "
-        "transitions a employeur constant, une pour les changements "
-        "d'employeur, avec mediane, quartiles et part de ruptures fortes.",
-        "Les deux lignes se lisent l'une par rapport a l'autre, jamais dans "
-        "l'absolu : une variation forte est attendue lors d'un changement "
-        "d'employeur, mais suspecte a employeur constant. Enjeu direct pour "
-        "l'imputation : si les changements d'employeur s'accompagnent "
-        "typiquement d'un saut important, alors reporter le salaire d'avant "
-        "sur un mois manquant d'apres transporte le salaire de l'ancien poste "
-        "— la continuite individuelle n'est legitime qu'a employeur constant. "
-        "Le seuil de rupture (50%) est un repere de lecture : ce controle "
-        "n'exclut aucune ligne des donnees.",
+        "Analyse_Salaire",
+        "Detailler, pour chaque fichier mensuel et chaque periodicite, le seuil "
+        "de plausibilite derive du SMIG, les salaires nuls, negatifs ou sous ce "
+        "seuil, et les confusions d'unite suspectees.",
+        "Version detaillee de Comparatif_Periodicite, ventilee par mois. Utile "
+        "pour situer dans le temps une anomalie reperee au niveau agrege : un "
+        "taux qui se degrade brutalement a partir d'un mois donne oriente vers "
+        "un changement de format source ou de pratique de saisie, non vers une "
+        "erreur diffuse.",
     ),
     (
-        "Declaration_Entreprise",
-        "Classer chaque couple (entreprise, mois) selon la part de ses "
-        "salaries dont le salaire est renseigne : AUCUNE_DECLARATION (0%), "
-        "DECLARATION_PARTIELLE (entre 0 et 100% exclus) ou "
-        "DECLARATION_COMPLETE (100%). Un salarie n'est compte que si le mois "
-        "suit sa DATE_EMBAUCHE, comme dans les feuilles Couverture_Declaration "
-        "et Non_Declarants.",
-        "Cette feuille tranche le choix methodologique entre l'annexe 2 et "
-        "l'annexe 3 de la note de reference. L'annexe 2 suppose qu'une "
-        "entreprise declare tout ou rien (R_jt = 0 ou 1) : elle ne sait pas "
-        "representer une entreprise qui declare 31 salaries sur 52. "
-        "L'annexe 3 ajoute pour cela un second etage individuel "
-        "(pi_ijt = p_jt x q_ijt). "
-        "Lire en priorite la colonne pct_des_salaries_manquants sur la ligne "
-        "DECLARATION_PARTIELLE : elle dit quelle part des salaires manquants "
-        "se trouve dans des entreprises qui ont pourtant declare ce mois-la. "
-        "Si cette part est marginale, l'annexe 2 suffit. Si elle est "
-        "importante, les traiter comme une absence totale de declaration "
-        "revient a ignorer les salaires reellement observes chez le meme "
-        "employeur le meme mois, et a imputer un salaire moyen d'entreprise "
-        "que l'on pourrait mesurer directement — l'annexe 3 s'impose alors. "
-        "Attention : ce controle est plus strict que l'indicateur D_JT de "
-        "05_base_entreprises.py, qui vaut 1 des que l'entreprise apparait "
-        "dans le fichier sans verifier qu'un salaire y figure.",
+        "Valeurs_manquantes",
+        "Mesurer, pour chaque variable et chaque fichier, la part de valeurs "
+        "non renseignees.",
+        "Permet de verifier que les variables sur lesquelles repose le "
+        "traitement sont effectivement disponibles. C'est notamment ce qui a "
+        "etabli que DATE_EMBAUCHE est renseignee a 100%, condition necessaire "
+        "pour s'en servir comme reference de comptage des mois manquants.",
+    ),
+    (
+        "Manquants_vs_Salaire",
+        "Comparer le taux de valeurs manquantes de chaque variable selon que le "
+        "salaire est lui-meme renseigne ou non sur la meme ligne.",
+        "Renseigne sur le mecanisme de non-reponse. Un ecart important indique "
+        "que les lignes sans salaire sont aussi mal remplies sur le reste : le "
+        "manque n'est pas isole mais tient a un defaut de saisie global, ce qui "
+        "oriente le choix des variables explicatives du modele de correction.",
+    ),
+    (
+        "Distribution",
+        "Donner les statistiques descriptives (min, max, moyenne, mediane, "
+        "ecart-type, quantiles) de chaque variable numerique, par fichier.",
+        "Permet de suivre les ordres de grandeur dans le temps et de reperer une "
+        "rupture entre deux mois consecutifs (changement d'unite, de bareme, de "
+        "population). Sert aussi de reference pour verifier l'effet de "
+        "l'ecretage des valeurs extremes.",
+    ),
+    (
+        "Outliers_Salaire",
+        "Reperer les valeurs extremes par la methode des quartiles (IQR), "
+        "globalement et separement pour chaque periodicite declaree.",
+        "Justifie le principe d'un ecretage des valeurs extremes, et surtout le "
+        "fait de le calculer APRES conversion en equivalent mensuel : comparer "
+        "les lignes par periodicite montre qu'un taux journalier, mecaniquement "
+        "plus petit, serait compte a tort comme une valeur extreme basse dans "
+        "une distribution dominee par des salaires mensuels.",
+    ),
+    (
+        "Doublons_lignes",
+        "Detecter les lignes strictement identiques au sein d'un meme fichier "
+        "mensuel.",
+        "Quantifie le volume de redondance a retirer avant tout calcul "
+        "d'effectif ou de masse salariale. Un pourcentage eleve indique un "
+        "probleme d'extraction cote source plutot qu'une realite des donnees.",
+    ),
+    (
+        "Transitions_ID",
+        "Mesurer, pour chaque paire de mois, la proportion d'identifiants du "
+        "mois d'origine retrouves dans le mois de destination.",
+        "Verifie la stabilite des identifiants individuels dans le temps, "
+        "condition necessaire pour suivre un meme salarie d'un mois a l'autre. "
+        "Une retention faible peut traduire un turnover reel, mais une chute "
+        "brutale et generalisee signale plutot un probleme de generation "
+        "d'identifiant qui invaliderait tout suivi longitudinal.",
     ),
 ]
 
@@ -1580,20 +1758,18 @@ def _export_audit_excel(
     output_object: str,
     *,
     doublons: pl.DataFrame,
-    colonnes: pl.DataFrame,
-    types: pl.DataFrame,
     valeurs_manquantes: pl.DataFrame,
     outliers: pl.DataFrame,
-    unicite_id: pl.DataFrame,
-    top_doublons_id: pl.DataFrame,
     transitions: pl.DataFrame,
     distribution: pl.DataFrame,
     manquants_vs_salaire: pl.DataFrame,
     analyse_salaire: pl.DataFrame,
+    comparatif_periodicite: pl.DataFrame,
     couverture_declaration: pl.DataFrame,
     non_declarants: pl.DataFrame,
     changement_employeur: pl.DataFrame,
     declaration_entreprise: pl.DataFrame,
+    synthese: pl.DataFrame,
 ) -> None:
     """Ecrit tous les DataFrames d'audit dans un classeur Excel sur MinIO."""
     def _write(buf: io.BytesIO) -> None:
@@ -1618,21 +1794,23 @@ def _export_audit_excel(
             "bg_color": _ALT_ROW_COLOR, "border": 1, "text_wrap": True,
         })
 
+        # Ordre de lecture : la synthese d'abord (quelles decisions, sur quels
+        # chiffres), puis les feuilles qui les etablissent, puis le contexte.
         sheets = [
-            ("Doublons_lignes", doublons),
-            ("Colonnes", colonnes),
-            ("Types_variables", types),
-            ("Valeurs_manquantes", valeurs_manquantes),
-            ("Outliers_Salaire", outliers),
-            ("Unicite_ID", unicite_id),
-            ("Top_doublons_ID", top_doublons_id),
-            ("Distribution", distribution),
-            ("Manquants_vs_Salaire", manquants_vs_salaire),
-            ("Analyse_Salaire", analyse_salaire),
+            # --- Ce qui justifie les choix methodologiques ---
+            ("Synthese_Methodologie", synthese),
+            ("Declaration_Entreprise", declaration_entreprise),
+            ("Comparatif_Periodicite", comparatif_periodicite),
+            ("Changement_Employeur", changement_employeur),
             ("Couverture_Declaration", couverture_declaration),
             ("Non_Declarants", non_declarants),
-            ("Changement_Employeur", changement_employeur),
-            ("Declaration_Entreprise", declaration_entreprise),
+            # --- Ce qui caracterise les donnees ---
+            ("Analyse_Salaire", analyse_salaire),
+            ("Valeurs_manquantes", valeurs_manquantes),
+            ("Manquants_vs_Salaire", manquants_vs_salaire),
+            ("Distribution", distribution),
+            ("Outliers_Salaire", outliers),
+            ("Doublons_lignes", doublons),
         ]
 
         _write_guide_lecture_sheet(wb, header_fmt, text_fmt)
@@ -1738,79 +1916,85 @@ def executer_audit(
 
     logger.info("Fichiers a auditer : {}", len(data))
 
-    logger.info("1/15 - Verification des doublons...")
-    df_doublons = _check_doublons(data)
-
-    logger.info("2/15 - Verification des colonnes...")
-    df_colonnes = _check_colonnes(data)
-
-    logger.info("3/15 - Verification des types...")
-    df_types = _check_types(data)
-
-    logger.info("4/15 - Verification des valeurs manquantes...")
-    df_missing = _check_valeurs_manquantes(data)
-
-    logger.info("5/15 - Detection des outliers ({}, par periodicite {})...", salary_var, type_var)
-    df_outliers = _check_outliers(
-        data, variable=salary_var, iqr_multiplier=iqr_multiplier, type_var=type_var
-    )
-
-    logger.info("6/15 - Verification de l'unicite des ID ({})...", id_var)
-    df_unicite = _check_unicite_id(data, id_var=id_var)
-
-    logger.info("7/15 - Top 5% des ID les plus dupliques ({})...", id_var)
-    df_top_dup = _check_top_doublons_id(data, id_var=id_var)
-
-    logger.info("8/15 - Matrice de transitions des ID ({})...", id_var)
-    df_transitions = _check_transitions(data, id_var=id_var)
-
-    logger.info("9/15 - Distribution des variables numeriques...")
-    df_distribution = _check_distribution(data)
-
-    logger.info("10/15 - Valeurs manquantes selon presence de {}...", salary_var)
-    df_manquants_vs_salaire = _check_manquants_vs_salaire(data, salary_var=salary_var)
-
-    logger.info("11/15 - Analyse du salaire par periodicite declaree ({})...", type_var)
-    df_analyse_salaire = _check_analyse_salaire(
-        data, salary_var=salary_var, type_var=type_var, smig_mensuel=cfg.cleaning.min_salary
-    )
-
-    logger.info("12/15 - Mois de salaire manquants par individu (toute la periode)...")
-    df_couverture = _check_couverture_declaration(
-        data, salary_var=salary_var, id_var=id_var, type_var=type_var,
-        hire_date_var=hire_date_var,
-    )
-
-    logger.info("13/15 - Individus sans aucune declaration de salaire...")
-    df_non_declarants = _check_non_declarants(
-        data, salary_var=salary_var, id_var=id_var, type_var=type_var,
-        hire_date_var=hire_date_var,
-    )
-
-    logger.info("14/15 - Variation de salaire lors d'un changement d'employeur...")
-    df_changement_employeur = _check_changement_employeur(
-        data, salary_var=salary_var, id_var=id_var, type_var=type_var,
-        employer_var=employer_var,
-    )
-
-    logger.info("15/15 - Nature de la non-declaration entreprise-mois (totale/partielle)...")
+    # --- Controles qui justifient les choix methodologiques ---
+    logger.info("1/11 - Nature de la non-declaration entreprise-mois (totale/partielle)...")
     df_declaration_entreprise = _check_declaration_entreprise(
         data, salary_var=salary_var, id_var=id_var, type_var=type_var,
         employer_var=employer_var, hire_date_var=hire_date_var,
     )
 
+    logger.info("2/11 - Comparatif des periodicites declarees ({})...", type_var)
+    df_comparatif_periodicite = _check_comparatif_periodicite(
+        data, salary_var=salary_var, type_var=type_var,
+        smig_mensuel=cfg.cleaning.min_salary,
+    )
+
+    logger.info("3/11 - Variation de salaire lors d'un changement d'employeur...")
+    df_changement_employeur = _check_changement_employeur(
+        data, salary_var=salary_var, id_var=id_var, type_var=type_var,
+        employer_var=employer_var,
+    )
+
+    logger.info("4/11 - Mois de salaire manquants par individu (toute la periode)...")
+    df_couverture = _check_couverture_declaration(
+        data, salary_var=salary_var, id_var=id_var, type_var=type_var,
+        hire_date_var=hire_date_var,
+    )
+
+    logger.info("5/11 - Individus sans aucune declaration de salaire...")
+    df_non_declarants = _check_non_declarants(
+        data, salary_var=salary_var, id_var=id_var, type_var=type_var,
+        hire_date_var=hire_date_var,
+    )
+
+    # --- Controles de caracterisation des donnees ---
+    logger.info("6/11 - Analyse du salaire par periodicite declaree ({})...", type_var)
+    df_analyse_salaire = _check_analyse_salaire(
+        data, salary_var=salary_var, type_var=type_var, smig_mensuel=cfg.cleaning.min_salary
+    )
+
+    logger.info("7/11 - Verification des valeurs manquantes...")
+    df_missing = _check_valeurs_manquantes(data)
+
+    logger.info("8/11 - Valeurs manquantes selon presence de {}...", salary_var)
+    df_manquants_vs_salaire = _check_manquants_vs_salaire(data, salary_var=salary_var)
+
+    logger.info("9/11 - Distribution des variables numeriques...")
+    df_distribution = _check_distribution(data)
+
+    logger.info("10/11 - Detection des outliers ({}, par periodicite {})...", salary_var, type_var)
+    df_outliers = _check_outliers(
+        data, variable=salary_var, iqr_multiplier=iqr_multiplier, type_var=type_var
+    )
+
+    logger.info("11/11 - Doublons et rotation des identifiants...")
+    df_doublons = _check_doublons(data)
+    df_transitions = _check_transitions(data, id_var=id_var)
+
+    # --- Synthese : relie chaque decision au chiffre qui la justifie ---
+    logger.info("Construction de la synthese methodologique...")
+    df_synthese = _build_synthese_methodologie(
+        declaration_entreprise=df_declaration_entreprise,
+        comparatif_periodicite=df_comparatif_periodicite,
+        non_declarants=df_non_declarants,
+        changement_employeur=df_changement_employeur,
+        couverture_declaration=df_couverture,
+    )
+
     logger.info("Export Excel...")
     _export_audit_excel(
         cfg, output_bucket, output_object,
-        doublons=df_doublons, colonnes=df_colonnes, types=df_types,
+        doublons=df_doublons,
         valeurs_manquantes=df_missing, outliers=df_outliers,
-        unicite_id=df_unicite, top_doublons_id=df_top_dup, transitions=df_transitions,
+        transitions=df_transitions,
         distribution=df_distribution, manquants_vs_salaire=df_manquants_vs_salaire,
         analyse_salaire=df_analyse_salaire,
+        comparatif_periodicite=df_comparatif_periodicite,
         couverture_declaration=df_couverture,
         non_declarants=df_non_declarants,
         changement_employeur=df_changement_employeur,
         declaration_entreprise=df_declaration_entreprise,
+        synthese=df_synthese,
     )
 
     logger.info("Fichier d'audit genere : {}", output_object)
