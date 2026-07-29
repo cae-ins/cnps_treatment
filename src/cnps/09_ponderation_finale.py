@@ -175,12 +175,18 @@ def calculer_poids_finaux(cfg: PipelineConfig) -> str:
             # portant sur 65,3% des salaires manquants serait perdue.
             df = df.with_columns(pl.Series("_W_AIPW", w_aipw))
             if "W_INDIV" in df.columns:
+                # W_INDIV n'est renseigne que sur le domaine d'estimation (entreprises
+                # declarantes). Hors domaine il vaut null : sans ce fill_null(1.0), la
+                # multiplication propagerait le null et retirerait silencieusement les
+                # salaries des entreprises non declarantes de toutes les statistiques.
+                n_hors_domaine = df["W_INDIV"].null_count()
                 df = df.with_columns(
-                    (pl.col("_W_AIPW") * pl.col("W_INDIV")).alias("W_FINAL")
+                    (pl.col("_W_AIPW") * pl.col("W_INDIV").fill_null(1.0)).alias("W_FINAL")
                 )
                 logger.info(
                     "AIPW (etage entreprise) compose avec W_INDIV (etage individuel) : "
-                    "W_FINAL = W_AIPW x W_INDIV"
+                    "W_FINAL = W_AIPW x W_INDIV ({} lignes hors domaine ramenees a "
+                    "W_INDIV=1.0)", n_hors_domaine,
                 )
             else:
                 df = df.with_columns(pl.col("_W_AIPW").alias("W_FINAL"))
@@ -193,22 +199,59 @@ def calculer_poids_finaux(cfg: PipelineConfig) -> str:
         else:
             logger.warning("Colonnes manquantes pour AIPW, repli sur IPW standard")
             df = df.with_columns(
-                (pl.col("W_JT") * pl.col("W_INDIV")).alias("W_FINAL")
+                (pl.col("W_JT").fill_null(1.0)
+                 * pl.col("W_INDIV").fill_null(1.0)).alias("W_FINAL")
             )
     else:
         # --- IPW standard ---
         df = df.with_columns(
-            (pl.col("W_JT") * pl.col("W_INDIV")).alias("W_FINAL")
+            (pl.col("W_JT").fill_null(1.0)
+             * pl.col("W_INDIV").fill_null(1.0)).alias("W_FINAL")
         )
 
-    # Normalisation des poids par strate (periode)
+    # Normalisation des poids par strate (periode).
+    # La moyenne d'une periode peut etre nulle (toutes les lignes du groupe a poids
+    # zero) : la division produirait alors des NaN silencieux, qui contaminent
+    # ensuite toute somme ponderee en aval. On neutralise ce cas explicitement.
     if "PERIOD" in df.columns:
         n_periodes = df["PERIOD"].n_unique()
+        moyenne_periode = pl.col("W_FINAL").mean().over("PERIOD")
         df = df.with_columns(
-            (pl.col("W_FINAL") / pl.col("W_FINAL").mean().over("PERIOD"))
+            pl.when(moyenne_periode > 0)
+            .then(pl.col("W_FINAL") / moyenne_periode)
+            .otherwise(pl.col("W_FINAL"))
             .alias("W_FINAL")
         )
         logger.info("Poids normalises par periode ({} periodes, moyenne=1.0 sur chacune)", n_periodes)
+
+    # Controle d'integrite : un poids null ou non fini retire silencieusement des
+    # lignes de toutes les statistiques ponderees en aval (regles de Rubin,
+    # etapes 10 et 12). L'erreur doit etre bloquante, pas un simple avertissement.
+    n_null = df["W_FINAL"].null_count()
+    n_non_fini = int(df.select(
+        (~pl.col("W_FINAL").is_finite() & pl.col("W_FINAL").is_not_null()).sum()
+    ).item())
+    if n_null or n_non_fini:
+        raise ValueError(
+            f"W_FINAL contient {n_null} valeurs nulles et {n_non_fini} valeurs non "
+            f"finies (NaN/inf) sur {df.height} lignes. Ces lignes seraient exclues "
+            f"des statistiques sans avertissement. Verifier que W_JT et W_INDIV sont "
+            f"renseignes sur l'ensemble du panel (etapes 07 et 07b) et que la "
+            f"normalisation par periode ne divise pas par une moyenne nulle."
+        )
+
+    # Un poids nul exclut la ligne des statistiques. C'est le comportement attendu
+    # de l'IPW pour les entreprises non declarantes (D_JT = 0) : elles n'ont pas de
+    # salaire observe a porter, la correction passe par la reponderation des
+    # declarantes. On le journalise pour que le volume reste explicite et verifiable.
+    n_zero = int(df.select((pl.col("W_FINAL") == 0).sum()).item())
+    if n_zero:
+        logger.info(
+            "Poids nuls : {} lignes ({:.2f}%) sortent des statistiques ponderees. "
+            "Attendu pour les entreprises non declarantes (D_JT = 0), dont la "
+            "contribution est portee par la reponderation des declarantes.",
+            n_zero, 100.0 * n_zero / df.height,
+        )
 
     write_parquet(cfg.minio, bucket, analytical_object, df)
     logger.info(
