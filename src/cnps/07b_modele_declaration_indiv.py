@@ -135,15 +135,24 @@ def _ajouter_historique_individuel(df: pl.DataFrame) -> pl.DataFrame:
     # mois estime.
     if {"EFFECTIF_DECLARE", "EFFECTIF_OBSERVE", "ID_EMPLOYEUR"} <= set(df.columns):
         df = df.sort([c for c in ("ID_EMPLOYEUR", "PERIOD", "ANNEE", "MOIS") if c in df.columns])
-        df = df.with_columns(
-            (
-                pl.col("EFFECTIF_DECLARE").cast(pl.Float64)
+        # Completude du mois : part des salaries presents dont le salaire est
+        # renseigne. Le panel de l'etape 05 etant equilibre, les mois ou
+        # l'entreprise n'apparait pas ont EFFECTIF_* a null : la completude y
+        # vaut 0 (rien de declare), et non "inconnue" -- d'ou le fill_null(0.0)
+        # AVANT le decalage. L'appliquer apres confondrait "mois precedent sans
+        # declaration" et "pas de mois precedent".
+        completude = (
+            pl.when(pl.col("EFFECTIF_OBSERVE").fill_null(0) > 0)
+            .then(
+                pl.col("EFFECTIF_DECLARE").fill_null(0).cast(pl.Float64)
                 / pl.col("EFFECTIF_OBSERVE").cast(pl.Float64)
             )
-            .shift(1)
+            .otherwise(0.0)
+        )
+        df = df.with_columns(
+            completude.shift(1)
             .over("ID_EMPLOYEUR")
-            .fill_null(0.0)
-            .fill_nan(0.0)
+            .fill_null(0.0)  # 1er mois observe : pas d'historique
             .alias("TAUX_COMPLETUDE_ENTREPRISE")
         )
         logger.info(

@@ -92,10 +92,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--include-hj-estimated", "--include_hj_estimated",
         dest="include_hj_estimated", action="store_true",
-        help="Relaye a l'etape 03 (03_nettoyage_donnees.py) uniquement : conserve "
-             "les journaliers/horaires (H/J) avec SALAIRE_BRUT_ESTIME_AU_MOIS au "
-             "lieu de les exclure. Les deux graphies (tiret/underscore) sont "
-             "acceptees.",
+        help="ANALYSE DE SENSIBILITE UNIQUEMENT, relaye a l'etape 03 seulement : "
+             "n'exclut aucun type d'employe, horaires compris. Par defaut, seuls "
+             "les horaires sont exclus (69%% de DUREE_TRAVAILLEE incoherente) ; "
+             "les journaliers sont conserves dans les deux cas. Les deux graphies "
+             "(tiret/underscore) sont acceptees.",
     )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()

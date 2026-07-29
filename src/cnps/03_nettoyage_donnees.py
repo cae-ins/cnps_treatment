@@ -127,25 +127,42 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     cfg : PipelineConfig
         Configuration du pipeline.
     include_hj_estimated : bool, optional
-        Si False (defaut) : comportement historique, les types d'employes de
-        ``cfg.cleaning.exclude_employee_types`` (typiquement ``["H", "J"]``,
-        journaliers/horaires) sont retires du jeu de donnees nettoye.
-        Si True : ces types sont CONSERVES, et ``SALAIRE_BRUT_ESTIME_AU_MOIS``
-        (cf. section 3) leur applique une estimation mensuelle a partir du
-        taux journalier/horaire declare, au lieu de les exclure. Le parametre
-        YAML ``cleaning.exclude_employee_types`` n'est pas modifie par ce
-        flag : il s'agit d'un choix ponctuel pour l'execution en cours,
-        pas d'un changement de configuration persistant.
+        Si False (defaut, **recommande**) : les types listes dans
+        ``cfg.cleaning.exclude_employee_types`` sont retires. Cette liste vaut
+        desormais ``["H"]`` : seuls les HORAIRES sont exclus, les journaliers
+        sont conserves et convertis via ``SALAIRE_BRUT_ESTIME_AU_MOIS``
+        (cf. section 3).
+
+        Si True : **aucun** type n'est exclu, horaires compris. A n'utiliser
+        que pour une analyse de sensibilite explicite. L'audit du 28/07/2026
+        (feuille ``Analyse_Salaire``) montre que 69% des lignes horaires ont
+        une ``DUREE_TRAVAILLEE`` incoherente et 65,5% une confusion d'unite
+        suspectee : les reintegrer propage ces erreurs, amplifiees par la
+        conversion x208.
+
+        Le parametre YAML ``cleaning.exclude_employee_types`` n'est jamais
+        modifie par ce flag : c'est un choix ponctuel pour l'execution en
+        cours, pas un changement de configuration persistant.
 
     Returns
     -------
     str
         Nom de l'objet Parquet nettoye sur MinIO.
     """
-    logger.info("Mode journaliers/horaires : {}",
-                "CONSERVES avec estimation mensuelle (SALAIRE_BRUT_ESTIME_AU_MOIS)"
-                if include_hj_estimated else
-                f"EXCLUS ({cfg.cleaning.exclude_employee_types}, comportement par defaut)")
+    if include_hj_estimated:
+        logger.warning(
+            "Mode periodicites : AUCUN type exclu (include_hj_estimated=True), "
+            "les HORAIRES sont reintegres alors que l'audit les signale comme "
+            "majoritairement ininterpretables (69% de DUREE_TRAVAILLEE "
+            "incoherente). Mode d'analyse de sensibilite uniquement -- ne pas "
+            "utiliser pour une production d'indicateurs."
+        )
+    else:
+        logger.info(
+            "Mode periodicites : types {} exclus (config), les autres sont "
+            "conserves et ramenes au mois via SALAIRE_BRUT_ESTIME_AU_MOIS.",
+            cfg.cleaning.exclude_employee_types,
+        )
 
     processed_bucket = cfg.minio.processed_bucket
     all_objects = list_objects(cfg.minio, processed_bucket, cfg.minio.processed_prefix, recursive=False)
@@ -270,8 +287,9 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         # silencieusement, toutes les lignes a TYPE_SALARIE non renseigne (qui
         # se trouvent avoir systematiquement SALAIRE_BRUT egalement manquant,
         # cf. TRAITEMENT_MANOUAN.md). Ce n'etait pas l'intention du filtre :
-        # seuls H/J doivent etre exclus, les lignes non renseignees doivent
-        # rester disponibles pour l'imputation en aval (etapes 07/08/09).
+        # seuls les types listes en config doivent etre exclus, les lignes non
+        # renseignees doivent rester disponibles pour l'imputation en aval
+        # (etapes 07/07b/08/09).
         df = df.filter(
             pl.col("TYPE_SALARIE").is_null()
             | ~pl.col("TYPE_SALARIE").is_in(cfg.cleaning.exclude_employee_types)
@@ -283,17 +301,17 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         )
         logger.info(
             "[Filtre 4/5 - Types d'employes exclus] Types {} exclus, TYPE_SALARIE non renseigne "
-            "CONSERVE (include_hj_estimated=False) : {} -> {} lignes ({} retirees, {:.2f}% du "
-            "volume entrant -- c'est generalement le filtre qui retire le plus de lignes de "
-            "toute l'etape 03, verifier ce pourcentage)",
+            "CONSERVE : {} -> {} lignes ({} retirees, {:.2f}% du volume entrant). "
+            "Attendu : ~1,4% du volume (horaires uniquement, cf. audit) -- un pourcentage "
+            "nettement superieur signale que la config exclut plus que les seuls horaires.",
             cfg.cleaning.exclude_employee_types, n_avant, df.height, n_retire,
             n_retire / n_avant * 100 if n_avant else 0.0,
         )
     elif "TYPE_SALARIE" in df.columns and cfg.cleaning.exclude_employee_types and include_hj_estimated:
-        logger.info(
+        logger.warning(
             "[Filtre 4/5 - Types d'employes exclus] IGNORE (include_hj_estimated=True) : "
-            "les types {} sont CONSERVES ; SALAIRE_BRUT_ESTIME_AU_MOIS leur sera calcule "
-            "en section 3 au lieu de les exclure.",
+            "les types {} sont CONSERVES, horaires compris. Analyse de sensibilite "
+            "uniquement.",
             cfg.cleaning.exclude_employee_types,
         )
     else:
@@ -341,7 +359,7 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         #   - les salaires nuls / a zero ;
         #   - les salaires positifs mais sous le seuil (SMIG mensuel, 75 000
         #     FCFA par defaut, cf. cleaning.min_salary dans settings.yaml,
-        #     ou seuil par periodicite ci-dessus si include_hj_estimated).
+        #     ou seuil ventile par periodicite calcule ci-dessus).
         # Les valeurs SALAIRE_BRUT.is_null() sont explicitement exemptees
         # (conservees telles quelles, une absence de salaire n'est pas la
         # meme incoherence qu'un montant errone -- elle reste disponible pour
@@ -606,11 +624,13 @@ if __name__ == "__main__":
     parser.add_argument("--dimensions", "-d", type=Path, default=None)
     parser.add_argument(
         "--include-hj-estimated", action="store_true",
-        help="Conserve les types d'employes journaliers/horaires (H/J) au lieu de "
-             "les exclure, en leur calculant SALAIRE_BRUT_ESTIME_AU_MOIS (equivalent "
-             "mensuel estime a partir du taux journalier/horaire declare). Ne modifie "
-             "pas cleaning.exclude_employee_types dans settings.yaml : ce choix "
-             "n'est valable que pour cette execution.",
+        help="ANALYSE DE SENSIBILITE UNIQUEMENT : n'exclut AUCUN type d'employe, "
+             "horaires compris, en leur calculant SALAIRE_BRUT_ESTIME_AU_MOIS. "
+             "Par defaut (sans ce flag), seuls les types listes dans "
+             "cleaning.exclude_employee_types sont retires -- soit les horaires, "
+             "dont 69%% des lignes ont une DUREE_TRAVAILLEE incoherente. Les "
+             "journaliers sont conserves dans les deux cas. Ne modifie jamais "
+             "settings.yaml : ce choix ne vaut que pour cette execution.",
     )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
