@@ -24,11 +24,18 @@ from loguru import logger
 from cnps.config import load_config
 
 _STAGE_DIR = Path(__file__).parent
-_STAGE_RE = re.compile(r"^(\d{2})_.*\.py$")
+# NN_*.py, avec un suffixe alphabetique optionnel pour les sous-etapes
+# inserees entre deux numeros existants (ex. 07b_ entre 07_ et 08_).
+_STAGE_RE = re.compile(r"^(\d{2}[a-z]?)_.*\.py$")
 
 
 def discover_stages() -> list[tuple[str, Path]]:
-    """Retourne [(numero, chemin), ...] tries, pour les fichiers NN_*.py."""
+    """
+    Retourne [(numero, chemin), ...] tries, pour les fichiers NN_*.py.
+
+    Le tri est lexicographique sur le numero, ce qui place naturellement une
+    sous-etape juste apres son etape parente ("07" < "07b" < "08").
+    """
     found = []
     for f in _STAGE_DIR.iterdir():
         m = _STAGE_RE.match(f.name)

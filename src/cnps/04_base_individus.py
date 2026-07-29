@@ -64,11 +64,47 @@ def construire_base_individus(cfg: PipelineConfig) -> str:
     else:
         logger.warning("Aucune colonne d'identifiant trouvee, OBS_ID non cree")
 
-    # Initialisation des poids
-    df = df.with_columns(
-        pl.lit(1.0).alias("W_INDIV"),
-        pl.lit(1).cast(pl.Int8).alias("S_IJT"),  # indicateur d'observation (1 = observe)
-    )
+    # --- Indicateur de declaration individuelle S_IJT (annexe 3) ---
+    #
+    # S_IJT = 1 si le salaire de CE salarie est effectivement renseigne ce
+    # mois-la, 0 sinon. C'est la variable expliquee du modele q_ijt de
+    # l'etape 07b : parmi les salaries d'une entreprise qui a declare, lesquels
+    # ont reellement un salaire ?
+    #
+    # Auparavant fixe a 1 pour toutes les lignes, ce qui rendait le second
+    # etage inoperant (W_INDIV restait a 1, et W_FINAL = W_JT x 1). Un salaire
+    # nul ou negatif ne compte pas comme declare : ce n'est pas une remuneration
+    # exploitable (meme convention que le nettoyage de l'etape 03 et les
+    # controles d'audit).
+    _salary_candidates = [
+        c for c in ("SALAIRE_BRUT_ESTIME_AU_MOIS", "SALAIRE_BRUT_MENS", "SALAIRE_BRUT")
+        if c in df.columns
+    ]
+    if _salary_candidates:
+        salary_col = _salary_candidates[0]
+        df = df.with_columns(
+            (pl.col(salary_col).is_not_null() & (pl.col(salary_col) > 0))
+            .cast(pl.Int8)
+            .alias("S_IJT")
+        )
+        n_declare = int(df["S_IJT"].sum())
+        logger.info(
+            "S_IJT calcule sur {} : {} lignes declarees sur {} ({:.2f}%), "
+            "{} sans salaire exploitable",
+            salary_col, n_declare, df.height,
+            n_declare / df.height * 100 if df.height else 0.0,
+            df.height - n_declare,
+        )
+    else:
+        df = df.with_columns(pl.lit(1).cast(pl.Int8).alias("S_IJT"))
+        logger.warning(
+            "Aucune colonne de salaire trouvee : S_IJT force a 1 pour toutes les "
+            "lignes. Le modele individuel de l'etape 07b sera inoperant."
+        )
+
+    # Poids individuel initial. Reste a 1.0 jusqu'a l'etape 07b, qui le
+    # remplace par 1/q_ijt pour les salaries des entreprises declarantes.
+    df = df.with_columns(pl.lit(1.0).alias("W_INDIV"))
 
     # Sous-variables de periode (si absentes)
     derived_period_cols = []

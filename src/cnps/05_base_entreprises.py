@@ -77,6 +77,16 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
             pl.col(salary_col).median().alias("SALAIRE_MEDIAN"),
             pl.col(salary_col).sum().alias("MASSE_SALARIALE"),
             pl.col(salary_col).std().alias("SALAIRE_SD"),
+            # Effectif dont le salaire est reellement renseigne (et positif).
+            # A distinguer de EFFECTIF_OBSERVE, qui compte les LIGNES presentes
+            # dans le fichier, salaire renseigne ou non : c'est cet ecart qui
+            # caracterise une declaration partielle (cf. annexe 3).
+            (
+                (pl.col(salary_col).is_not_null() & (pl.col(salary_col) > 0))
+                .sum()
+                .cast(pl.Int64)
+                .alias("EFFECTIF_DECLARE")
+            ),
         ])
 
     if "SEXE" in df.columns:
@@ -123,19 +133,77 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
         firm_df = firm_df.drop([c for c in ["MOIS", "ANNEE"] if c in balanced.columns], strict=False)
         firm_df = balanced.join(firm_df, on=join_cols, how="left")
 
-        # Indicateur de declaration
-        firm_df = firm_df.with_columns(
-            pl.when(pl.col("EFFECTIF_OBSERVE").is_not_null())
-            .then(pl.lit(1))
-            .otherwise(pl.lit(0))
-            .cast(pl.Int8)
-            .alias("D_JT")
+        # --- Indicateur de declaration D_JT (= p_jt de l'annexe 3) ---
+        #
+        # D_JT = 1 si l'entreprise a transmis AU MOINS UN salaire ce mois-la.
+        #
+        # Attention : ce n'est PAS la simple presence de l'entreprise dans le
+        # fichier. Une entreprise peut y figurer avec 52 salaries et aucun
+        # salaire renseigne : elle n'a alors rien declare, et D_JT doit valoir
+        # 0. Definir D_JT sur EFFECTIF_OBSERVE (un simple comptage de lignes)
+        # ferait estimer au modele de l'etape 07 une probabilite de PRESENCE
+        # dans le fichier, et non de DECLARATION -- les poids 1/p corrigeraient
+        # alors un mecanisme different de celui vise.
+        #
+        # La non-declaration PARTIELLE (l'entreprise declare, mais omet une
+        # partie de ses salaries) n'est volontairement pas traitee ici : elle
+        # releve du second etage q_ijt (etape 07b), conformement a l'annexe 3
+        # ou pi_ijt = p_jt x q_ijt. Utiliser un seuil de completude sur D_JT
+        # melangerait les deux mecanismes.
+        if "EFFECTIF_DECLARE" in firm_df.columns:
+            firm_df = firm_df.with_columns(
+                pl.when(pl.col("EFFECTIF_DECLARE").fill_null(0) > 0)
+                .then(pl.lit(1))
+                .otherwise(pl.lit(0))
+                .cast(pl.Int8)
+                .alias("D_JT")
+            )
+            base_d_jt = "EFFECTIF_DECLARE > 0 (au moins un salaire renseigne)"
+        else:
+            # Repli : sans colonne de salaire exploitable, on retombe sur la
+            # presence dans le fichier (comportement historique).
+            firm_df = firm_df.with_columns(
+                pl.when(pl.col("EFFECTIF_OBSERVE").is_not_null())
+                .then(pl.lit(1))
+                .otherwise(pl.lit(0))
+                .cast(pl.Int8)
+                .alias("D_JT")
+            )
+            base_d_jt = "presence dans le fichier (REPLI : aucune colonne de salaire)"
+            logger.warning(
+                "D_JT calcule sur la seule presence dans le fichier : la colonne de "
+                "salaire est absente, la declaration ne peut pas etre verifiee."
+            )
+
+        n_decl = firm_df.filter(pl.col("D_JT") == 1).height
+        n_non_decl = firm_df.filter(pl.col("D_JT") == 0).height
+        logger.info("D_JT defini sur : {}", base_d_jt)
+        logger.info(
+            "Panel equilibre : {} lignes ({} declarantes, {} non-declarantes, "
+            "soit {:.2f}% de taux de declaration)",
+            firm_df.height, n_decl, n_non_decl,
+            n_decl / firm_df.height * 100 if firm_df.height else 0.0,
         )
 
-        logger.info("Panel equilibre : {} lignes ({} declarantes, {} non-declarantes)",
-                     firm_df.height,
-                     firm_df.filter(pl.col("D_JT") == 1).height,
-                     firm_df.filter(pl.col("D_JT") == 0).height)
+        # Ventilation totale / partielle / complete, pour verifier que D_JT
+        # capte bien ce qu'on attend (memes categories que la feuille
+        # Declaration_Entreprise de l'audit).
+        if "EFFECTIF_DECLARE" in firm_df.columns:
+            ventil = firm_df.with_columns(
+                pl.when(pl.col("EFFECTIF_DECLARE").fill_null(0) == 0)
+                .then(pl.lit("AUCUNE_DECLARATION"))
+                .when(pl.col("EFFECTIF_DECLARE") >= pl.col("EFFECTIF_OBSERVE"))
+                .then(pl.lit("DECLARATION_COMPLETE"))
+                .otherwise(pl.lit("DECLARATION_PARTIELLE"))
+                .alias("_CAT")
+            )
+            for cat, n in (
+                ventil.group_by("_CAT").agg(pl.len().alias("n")).sort("_CAT").iter_rows()
+            ):
+                logger.info(
+                    "  {} : {} couples entreprise-mois ({:.2f}%)",
+                    cat, n, n / firm_df.height * 100 if firm_df.height else 0.0,
+                )
 
     # --- Poids entreprise initiaux ---
     firm_df = firm_df.with_columns(pl.lit(1.0).alias("W_JT"))
