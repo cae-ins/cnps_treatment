@@ -262,10 +262,12 @@ def _check_manquants_vs_salaire(
 
 
 # Duree standard utilisee pour deriver un seuil plausible journalier/horaire
-# a partir du SMIG mensuel (cfg.cleaning.min_salary) : 26 jours ouvres/mois,
-# 8h/jour (soit 208h/mois). Convention documentaire, ajustable si besoin.
-_JOURS_OUVRES_PAR_MOIS = 26
-_HEURES_PAR_MOIS = 208
+# a partir du SMIG mensuel (cfg.cleaning.min_salary) : 22,4 jours ouvres/mois
+# (moyenne annuelle hors dimanches et jours feries), 8h/jour (179,2h/mois).
+# DOIT rester identique aux constantes de 03_nettoyage_donnees.py : l'audit
+# justifie la methode appliquee, il ne peut pas reposer sur une autre convention.
+_JOURS_OUVRES_PAR_MOIS = 22.4
+_HEURES_PAR_MOIS = 179.2
 
 _LABEL_PERIODICITE = {"M": "Mensuel", "J": "Journalier", "H": "Horaire"}
 
@@ -432,8 +434,8 @@ def _ajouter_salaire_mensuel(
     individu a l'autre.
 
     Memes conventions que ``_check_analyse_salaire`` et l'etape 03
-    (``SALAIRE_BRUT_ESTIME_AU_MOIS``) : J -> x26, H -> x208, M ou non
-    renseigne -> inchange.
+    (``SALAIRE_BRUT_ESTIME_AU_MOIS``) : J -> x_JOURS_OUVRES_PAR_MOIS,
+    H -> x_HEURES_PAR_MOIS, M ou non renseigne -> inchange.
     """
     if type_var not in df.columns:
         return df.with_columns(pl.col(salary_var).alias("_SAL_MENS"))
@@ -474,7 +476,7 @@ def _check_comparatif_periodicite(
       pour cette periodicite.
 
     Lecture : un type dont la majorite des lignes est incoherente ne peut pas
-    etre converti de facon fiable -- la conversion (x26 ou x208) amplifierait
+    etre converti de facon fiable -- la conversion au mois amplifierait
     l'erreur au lieu de la corriger. Un type dont les durees sont saines peut
     l'etre, meme si le taux de "confusion" parait eleve (l'heuristique de
     confusion produit des faux positifs : un journalier bien paye ressemble a
@@ -1135,7 +1137,10 @@ def _build_synthese_methodologie(
 
     # --- 3. Maintien des journaliers ---
     lignes.append({
-        "decision": "CONSERVER les salaries JOURNALIERS, convertis x26",
+        "decision": (
+            f"CONSERVER les salaries JOURNALIERS, convertis "
+            f"x{_JOURS_OUVRES_PAR_MOIS:g} jours ouvres"
+        ),
         "justification": (
             f"Seulement {duree_j:.2f}% de durees incoherentes : la conversion repose "
             "sur une base fiable, contrairement aux horaires. Les exclure biaiserait "
@@ -1470,7 +1475,7 @@ _GUIDE_LECTURE: list[tuple[str, str, str]] = [
         "Cette feuille justifie l'inclusion ou l'exclusion de chaque type de "
         "salarie. L'indicateur decisif est pct_duree_incoherente : une duree "
         "travaillee aberrante rend le montant ininterpretable, donc non "
-        "convertible en equivalent mensuel — la conversion (x26 ou x208) "
+        "convertible en equivalent mensuel — la conversion au mois "
         "amplifierait l'erreur au lieu de la corriger. Un taux eleve de "
         "confusion d'unite est en revanche a nuancer : l'heuristique produit des "
         "faux positifs, un journalier bien paye ressemblant a un mensuel mal "

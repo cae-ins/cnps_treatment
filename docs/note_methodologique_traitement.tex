@@ -1,0 +1,583 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[french]{babel}
+\usepackage{lmodern}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage[hidelinks]{hyperref}
+\usepackage{siunitx}
+
+\sisetup{group-separator={\,},group-minimum-digits=4,detect-all}
+
+\definecolor{bleufonce}{HTML}{1F3864}
+\definecolor{bleuclair}{HTML}{DCE6F1}
+\definecolor{grisdoux}{HTML}{F4F4F4}
+\definecolor{rougesobre}{HTML}{8B2222}
+\definecolor{vertsobre}{HTML}{1E5631}
+
+\titleformat{\section}{\Large\bfseries\color{bleufonce}}{\thesection}{0.7em}{}
+\titleformat{\subsection}{\large\bfseries\color{bleufonce}}{\thesubsection}{0.7em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small\color{bleufonce}Traitement des salaires CNPS}
+\rhead{\small\color{bleufonce}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\newtcolorbox{encadre}[1]{colback=bleuclair,colframe=bleufonce,
+  title=#1,fonttitle=\bfseries,boxrule=0.6pt,arc=2pt,left=6pt,right=6pt}
+
+\newtcolorbox{alerte}[1]{colback=white,colframe=rougesobre,
+  title=#1,fonttitle=\bfseries,boxrule=0.6pt,arc=2pt,left=6pt,right=6pt}
+
+\newtcolorbox{retenir}{colback=grisdoux,colframe=black!30,
+  boxrule=0.5pt,arc=2pt,left=6pt,right=6pt}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+\vspace*{2.5cm}
+{\color{bleufonce}\rule{\textwidth}{1.5pt}}\\[0.6cm]
+{\Huge\bfseries\color{bleufonce} Estimation du salaire moyen}\\[0.35cm]
+{\Large\color{bleufonce} à partir des déclarations CNPS}\\[0.6cm]
+{\color{bleufonce}\rule{\textwidth}{1.5pt}}\\[1.4cm]
+
+{\large Note méthodologique et corrections apportées aux données}\\[0.5cm]
+{\large Période couverte : janvier 2024 -- novembre 2025 (23 mois)}\\[3cm]
+
+\begin{minipage}{0.8\textwidth}
+\centering\itshape
+Cette note décrit le traitement appliqué aux fichiers mensuels de
+déclarations CNPS, les corrections retenues, et la méthode d'estimation
+choisie. Elle est rédigée pour être lue sans connaissance préalable du
+code informatique.
+\end{minipage}
+
+\vfill
+{\large\today}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ==================================================================
+\section{Ce que l'on cherche à mesurer, et pourquoi c'est difficile}
+
+\subsection{L'objectif}
+
+Nous voulons estimer le salaire moyen des travailleurs déclarés à la
+CNPS, et le décliner par sexe, secteur d'activité, commune, taille
+d'entreprise, profession et tranche d'âge.
+
+À première vue, l'affaire semble simple : les fichiers contiennent des
+salaires, il suffirait d'en faire la moyenne. C'est précisément cette
+intuition qu'il faut écarter, et la raison en est le c\oe ur de cette note.
+
+\subsection{Le problème central : les salaires manquants ne manquent pas au hasard}
+
+Sur l'ensemble des lignes retenues après nettoyage, un peu plus de quatre
+sur dix seulement portent un salaire exploitable. Près de six lignes sur
+dix n'indiquent aucun salaire.
+
+Si ces absences étaient réparties au hasard, il n'y aurait pas de
+difficulté : la moyenne calculée sur les 43\,\% observés serait une
+estimation correcte de la moyenne générale. C'est le raisonnement du
+sondage classique --- interroger 1\,000 personnes tirées au sort renseigne
+sur la population entière.
+
+Mais ces absences ne sont pas aléatoires. Une entreprise qui ne déclare
+pas n'est pas une entreprise ordinaire : elle est plus souvent petite,
+plus souvent dans certains secteurs, et surtout elle verse probablement
+des salaires différents de celles qui déclarent scrupuleusement.
+
+\begin{encadre}{L'analogie du sondage biaisé}
+Supposons que l'on veuille connaître la taille moyenne des habitants d'une
+ville, et que l'on installe le mètre à l'entrée d'un club de basket. On
+obtiendra une moyenne parfaitement calculée --- et parfaitement fausse.
+L'erreur ne vient pas du calcul mais de \emph{qui a été mesuré}.
+
+Notre situation est analogue : les salaires observés ne sont pas un
+échantillon neutre des salaires versés. Ignorer ce point produirait un
+chiffre précis et biaisé.
+\end{encadre}
+
+\subsection{Trois régimes de données manquantes}
+
+La statistique distingue trois situations, qui appellent des traitements
+différents.
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{Manquant complètement au hasard.} L'absence ne dépend de
+  rien. Une page perdue, une saisie oubliée sans motif. On peut alors
+  ignorer les manquants sans biais.
+
+  \item \textbf{Manquant conditionnellement au hasard.} L'absence dépend de
+  caractéristiques que l'on \emph{observe} --- le secteur, la taille de
+  l'entreprise, son historique. C'est le cas exploitable : si l'on sait
+  \emph{qui} a tendance à ne pas déclarer, on peut corriger.
+
+  \item \textbf{Manquant de façon non aléatoire.} L'absence dépend du
+  salaire lui-même, y compris à caractéristiques observées identiques.
+  Aucune correction n'est pleinement satisfaisante ; on documente et l'on
+  teste la sensibilité.
+\end{itemize}
+
+Notre traitement se place dans le deuxième régime, et nous verrons plus
+loin que les données le justifient : la non-déclaration est très
+fortement prédictible à partir des caractéristiques observables.
+
+% ==================================================================
+\section{Les corrections apportées aux données}
+
+Avant toute estimation, les fichiers bruts subissent une série de
+filtres. Chacun répond à un problème identifié, et chacun est chiffré :
+nous savons exactement combien de lignes sont écartées et pourquoi.
+
+Le point de départ est de \num{27558243} lignes réparties sur 23 fichiers
+mensuels.
+
+Les volumes indiqués ci-après pour chaque filtre correspondent à
+l'exécution de référence. L'assouplissement du filtre 2, décrit plus bas,
+augmente sensiblement le volume conservé : les chiffres définitifs sont
+ceux du journal d'exécution le plus récent.
+
+\subsection{Filtre 1 --- Les doublons stricts}
+
+Des lignes rigoureusement identiques sur toutes les colonnes apparaissent
+dans les fichiers. Elles traduisent une double saisie et non deux
+emplois. Retrait : \num{421} lignes (0,00\,\%).
+
+\subsection{Filtre 2 --- Les niveaux de doublon signalés à la source}
+
+Les fichiers sources portent une colonne de qualité qui signale les
+enregistrements ambigus. La répartition observée est la suivante :
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+\textbf{Marquage} & \textbf{Lignes} & \textbf{Traitement} \\
+\midrule
+unique & \num{22661333} & conservé \\
+doublon niveau 2 & \num{2276897} & conservé \\
+doublon niveau 4 & \num{2243703} & conservé \\
+doublon niveau 1 & \num{362329} & conservé \\
+doublon niveau 3 & \num{13560} & \textbf{retiré} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Seul le \textbf{niveau 3} est écarté, soit \num{13560} lignes (0,06\,\%).
+Les niveaux 1, 2 et 4 sont conservés.
+
+Ce choix mérite d'être explicité, car il a été révisé. Une première
+version du traitement ne retenait que les lignes marquées \emph{unique},
+ce qui revenait à écarter \num{4896489} lignes --- près d'une sur cinq. Or
+un marquage de doublon ne signifie pas nécessairement double compte : deux
+lignes peuvent légitimement correspondre à un cumul d'emplois chez des
+employeurs distincts, ou à une reprise de contrat en cours de mois. Les
+écarter en bloc revenait à perdre des situations réelles.
+
+La protection contre les doubles comptes est donc reportée sur le filtre
+suivant, qui agit sur une base vérifiable : un même individu, chez un même
+employeur, sur un même mois.
+
+\begin{retenir}
+\textbf{Principe.} Un signalement produit en amont indique un doute, pas
+un verdict. On ne retire une ligne que sur un critère que l'on peut
+vérifier soi-même --- ici, l'identité du triplet individu / employeur /
+mois.
+\end{retenir}
+
+\subsection{Filtre 3 --- Les doublons d'identifiants}
+
+Ce filtre porte l'essentiel de la protection contre les doubles comptes,
+depuis que le filtre précédent a été assoupli.
+
+La règle est vérifiable directement : une même personne ne peut avoir
+qu'une seule déclaration chez un même employeur pour un même mois. Lorsque
+plusieurs lignes correspondent à ce triplet, une seule est retenue --- celle
+au salaire le plus élevé, les autres étant le plus souvent des saisies
+incomplètes.
+
+Un point mérite attention : ce filtre ne touche \emph{pas} les personnes
+déclarées chez plusieurs employeurs différents. Le cumul d'emplois est une
+réalité, non une erreur, et l'écraser sous-estimerait les revenus.
+
+\subsection{Filtre 4 --- Les travailleurs horaires}
+
+Les fichiers distinguent trois périodicités de rémunération : mensuelle,
+journalière, horaire. Le salaire déclaré n'a donc pas la même unité selon
+les lignes, et il faut le ramener à une base mensuelle commune.
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Périodicité} & \textbf{Lignes} & \textbf{Part} \\
+\midrule
+Non renseignée & \num{12743340} & 56,2\,\% \\
+Mensuelle & \num{9265833} & 40,9\,\% \\
+Journalière & \num{525750} & 2,3\,\% \\
+Horaire & \num{126410} & 0,6\,\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+L'audit des durées travaillées a révélé une anomalie décisive :
+\textbf{près de 7 lignes horaires sur 10 portent une durée
+matériellement impossible} (supérieure à 744 heures, soit le nombre
+d'heures que compte un mois complet, nuits comprises). Chez les
+journaliers, la même anomalie ne concerne que 0,12\,\% des lignes.
+
+La conclusion s'impose : le champ « horaire » n'est pas fiable. Il est
+vraisemblablement utilisé comme valeur par défaut lors de saisies
+incertaines. Ces \num{126410} lignes sont écartées (0,6\,\% du volume).
+
+Les journaliers, eux, sont \emph{conservés} et convertis au mois par un
+coefficient de \textbf{22,4 jours ouvrés}. Les écarter aurait retiré une
+population réelle sur la foi d'un problème qui ne la concerne pas.
+
+Le choix de 22,4 mérite un mot. Ce nombre correspond à la moyenne annuelle
+des jours travaillés une fois déduits les dimanches et les jours fériés.
+La convention alternative, 26 jours, suppose un mois travaillé six jours
+sur sept sans interruption --- une hypothèse qui majore mécaniquement les
+salaires reconstitués. À 22,4, une rémunération de \num{3000} FCFA par jour
+équivaut à \num{67200} FCFA par mois, contre \num{78000} FCFA avec
+l'ancienne convention.
+
+Ce coefficient sert aussi à définir le seuil de plausibilité applicable aux
+journaliers : le salaire minimum mensuel divisé par 22,4, soit
+\num{3348} FCFA par jour. Les deux usages restent ainsi cohérents --- un
+journalier payé exactement au seuil atteint exactement le minimum une fois
+converti.
+
+\begin{retenir}
+\textbf{À retenir.} Nous n'excluons pas une catégorie parce qu'elle est
+gênante, mais parce que la mesure a démontré qu'elle n'est pas
+exploitable. Les journaliers, dont les durées sont cohérentes, restent
+dans le champ.
+\end{retenir}
+
+\subsection{Filtre 5 --- Les salaires implausibles}
+
+Un salaire nul, négatif, ou inférieur au minimum légal traduit une erreur
+de saisie plutôt qu'une rémunération réelle. Le seuil est appliqué
+\emph{par périodicité} : \num{75000} FCFA pour un mensuel, mais
+\num{3348} FCFA pour une journée --- soit le même minimum, exprimé dans
+l'unité de la ligne.
+
+Ce détail a son importance. Appliquer le seuil mensuel à un salaire
+journalier aurait éliminé la quasi-totalité des journaliers : un montant
+de quelques milliers de francs par jour est parfaitement normal, il est
+seulement exprimé dans une autre unité.
+
+\textbf{Les salaires manquants ne sont pas retirés à ce
+stade} : leur absence est précisément l'information que la méthode va
+traiter.
+
+\subsection{La conversion au mois, puis l'écrêtement des valeurs extrêmes}
+
+Une fois les filtres passés, les salaires journaliers sont multipliés par
+26 pour obtenir un équivalent mensuel (\num{517248} lignes concernées).
+
+Vient ensuite l'\textbf{écrêtement} des valeurs extrêmes, aussi appelé
+\emph{winsorisation}. Le principe : une poignée de valeurs aberrantes peut
+déplacer une moyenne de façon disproportionnée. Plutôt que de supprimer
+ces lignes --- ce qui perdrait l'information qu'un salaire existe --- on
+ramène les 1\,\% les plus bas et les 1\,\% les plus hauts aux valeurs
+seuils correspondantes.
+
+\begin{encadre}{Pourquoi l'ordre des opérations change tout}
+L'écrêtement était initialement appliqué \emph{avant} la conversion des
+périodicités. Le seuil bas calculé sur ce mélange d'unités valait
+\num{510} FCFA --- une valeur qui n'est ni un salaire mensuel plausible ni
+un taux journalier identifiable. Résultat : le garde-fou ne coupait rien
+du côté des mensuels.
+
+Après correction de l'ordre, le seuil bas s'établit à \num{75000} FCFA et
+le seuil haut à \num{5303714} FCFA. Ce sont des bornes interprétables. On
+observe \textbf{zéro valeur écrêtée en bas} --- signe que les filtres
+précédents ont déjà fait leur travail --- et \num{96290} en haut.
+
+Une opération statistiquement correcte appliquée dans le mauvais ordre
+devient inopérante. Le contrôle ne consiste pas seulement à vérifier
+qu'un traitement a lieu, mais qu'il produit des bornes qui ont un sens.
+\end{encadre}
+
+% ==================================================================
+\section{La méthode d'estimation retenue}
+
+\subsection{Deux niveaux de non-déclaration, et non un seul}
+
+La note méthodologique de référence propose deux approches. La différence
+tient à une question simple : \emph{où} se situe la non-déclaration ?
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{Approche à un étage.} On suppose qu'une entreprise déclare
+  ou ne déclare pas. Si elle déclare, tous ses salariés sont couverts.
+  \item \textbf{Approche à deux étages.} Une entreprise peut déclarer
+  \emph{partiellement} : transmettre un état pour une partie seulement de
+  ses effectifs.
+\end{itemize}
+
+Le choix entre les deux n'est pas affaire de préférence. Il se tranche par
+la mesure : les déclarations partielles existent-elles, et dans quelle
+proportion ?
+
+\subsection{Ce que les données ont montré}
+
+Nous avons classé chacun des \num{1442146} couples
+\emph{entreprise\,$\times$\,mois} en trois catégories.
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Situation} & \textbf{Couples} & \textbf{Part} \\
+\midrule
+Aucune déclaration & \num{865524} & 60,0\,\% \\
+Déclaration complète & \num{357551} & 24,8\,\% \\
+Déclaration partielle & \num{219071} & 15,2\,\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Les déclarations partielles représentent 15,2\,\% des couples --- une
+minorité en apparence. Mais ces entreprises sont nettement plus grandes
+que la moyenne. Rapporté aux salariés concernés, le constat change
+d'échelle :
+
+\begin{alerte}{Le chiffre décisif}
+\textbf{65,3\,\% des salaires manquants} --- soit \num{10133921} lignes sur
+\num{15519029} --- se trouvent dans des entreprises qui \emph{ont bien
+déclaré ce mois-là}, mais sans couvrir la totalité de leur effectif.
+
+Une méthode à un seul étage considérerait ces entreprises comme
+« déclarantes » et n'appliquerait aucune correction à ces lignes. Près des
+deux tiers du problème resteraient non traités.
+\end{alerte}
+
+C'est ce résultat, et lui seul, qui a déterminé le choix de l'approche à
+deux étages.
+
+\subsection{Le principe de la correction par repondération}
+
+L'idée est celle du redressement d'enquête. Reprenons l'analogie du
+sondage.
+
+Si dans une enquête les femmes répondent deux fois moins souvent que les
+hommes, on ne jette pas les réponses des femmes : on leur donne un
+\emph{poids} double, pour que chaque répondante représente les deux
+femmes qu'elle incarne dans la population.
+
+Notre correction procède ainsi. Pour chaque ligne, on estime la
+probabilité qu'elle soit déclarée, à partir des caractéristiques
+observables. Puis on attribue un poids inversement proportionnel à cette
+probabilité :
+
+\[
+\text{poids} \;=\; \frac{1}{\text{probabilité d'être déclaré}}
+\]
+
+Une déclaration rare, provenant d'un profil qui déclare peu, compte
+davantage : elle représente tous ses semblables restés silencieux.
+
+Avec deux étages, la probabilité totale se décompose en un produit :
+
+\[
+\underbrace{\pi}_{\substack{\text{probabilité}\\\text{d'être déclaré}}}
+\;=\;
+\underbrace{p}_{\substack{\text{l'entreprise}\\\text{déclare}}}
+\;\times\;
+\underbrace{q}_{\substack{\text{le salarié est couvert,}\\\text{sachant qu'elle déclare}}}
+\]
+
+Deux modèles sont donc estimés : l'un sur les entreprises, l'autre sur les
+individus au sein des entreprises déclarantes.
+
+\subsection{Qualité des modèles obtenue}
+
+La capacité d'un modèle à distinguer les déclarants des non-déclarants se
+mesure par un indicateur compris entre 0,5 (hasard pur) et 1
+(discrimination parfaite). Le seuil d'acceptabilité retenu est 0,60.
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Modèle} & \textbf{Indicateur} & \textbf{Lecture} \\
+\midrule
+Déclaration de l'entreprise & 0,9246 & très discriminant \\
+Couverture du salarié & 0,9713 & très discriminant \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Ces valeurs élevées confirment le diagnostic posé en première partie : la
+non-déclaration est \emph{fortement liée aux caractéristiques
+observables}. Ce n'est pas un phénomène aléatoire, et c'est précisément ce
+qui rend la correction légitime.
+
+Une précision utile : ces modèles n'utilisent que des informations
+antérieures au mois considéré. Un modèle qui « verrait » le mois courant
+obtiendrait un score parfait sans rien prédire du tout. Un premier
+ajustement donnait d'ailleurs un score de 1,0000 --- signal d'alerte
+classique, corrigé depuis.
+
+\subsection{L'imputation des entreprises totalement muettes}
+
+Pour les \num{865524} couples sans aucune déclaration, la repondération ne
+suffit pas : il n'y a rien à repondérer. Un salaire moyen est donc
+\emph{imputé} à partir des caractéristiques de l'entreprise et de son
+historique.
+
+Cette imputation est répétée cinq fois avec une part d'aléa. La raison est
+d'honnêteté statistique : une valeur imputée n'est pas une valeur
+observée, et présenter une estimation unique reviendrait à masquer
+l'incertitude. En combinant cinq versions, les intervalles de confiance
+publiés intègrent le fait qu'une partie du chiffre est reconstituée.
+
+% ==================================================================
+\section{Point de vigilance non résolu}
+
+\subsection{La concentration des poids}
+
+Un problème demeure, et il doit être porté à connaissance avant toute
+utilisation des chiffres.
+
+Les poids attribués aux entreprises sont très inégalement répartis :
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+\textbf{Statistique} & \textbf{Valeur} \\
+\midrule
+Poids médian & 2,77 \\
+Poids moyen & \num{1492.73} \\
+Poids maximal & \num{8231.55} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Un écart de cette ampleur entre médiane et moyenne signale une
+concentration extrême : \textbf{environ 1\,\% des couples
+entreprise\,$\times$\,mois portent une part majeure de l'estimation}.
+
+L'explication tient à la qualité même des modèles. Lorsqu'une entreprise
+n'a jamais déclaré, le modèle lui attribue une probabilité de déclaration
+très proche de zéro. L'inverse de cette probabilité devient alors
+considérable. La méthode fonctionne « trop bien » : elle identifie si
+sûrement les non-déclarants qu'elle produit des poids déséquilibrés.
+
+\subsection{Portée et options}
+
+Concrètement, l'estimation repose sur un petit nombre d'entreprises. Si
+l'une d'elles présente une particularité, elle se répercute fortement sur
+le résultat d'ensemble. L'estimation reste correcte en moyenne, mais sa
+\emph{stabilité} est affaiblie.
+
+Deux voies sont possibles :
+
+\begin{center}
+\begin{tabular}{p{0.42\textwidth}p{0.42\textwidth}}
+\toprule
+\textbf{Resserrer le plafond des poids} & \textbf{Retirer l'historique du modèle} \\
+\midrule
+Limiter les poids au 95\textsuperscript{e} centile au lieu du
+99\textsuperscript{e}. Réduit la concentration immédiatement.
+&
+L'historique de déclaration prédit presque parfaitement le silence.
+L'écarter donne des probabilités moins extrêmes. \\[0.3cm]
+\emph{Traite l'effet.} Simple, réversible, effet mesurable.
+&
+\emph{Traite la cause.} Plus rigoureux, mais dégrade le pouvoir explicatif. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{alerte}{Recommandation}
+Ce point doit être arbitré \textbf{avant} diffusion des résultats. En
+l'état, les chiffres par grandes catégories (national, sexe, grands
+secteurs) sont exploitables ; les ventilations fines --- notamment par
+profession, qui compte \num{20656} modalités --- appellent la plus grande
+prudence.
+\end{alerte}
+
+% ==================================================================
+\section{Limites à signaler}
+
+Trois réserves accompagnent ces résultats.
+
+\paragraph{Deux variables entièrement vides.} Le niveau d'étude et la
+catégorie d'entreprise sont absents à 100\,\%. Aucune ventilation selon
+ces axes n'est possible, et ils ne peuvent servir au modèle.
+
+\paragraph{La périodicité inconnue dans 56,9\,\% des cas.} Ces lignes sont
+traitées comme mensuelles par défaut. Cette hypothèse est raisonnable ---
+c'est la modalité dominante parmi les lignes renseignées --- mais elle
+demeure une hypothèse. Si une part significative de ces lignes
+correspondait en réalité à des journaliers, les salaires concernés
+seraient sous-estimés.
+
+\paragraph{Les indicateurs d'inégalité sont à écarter.} L'écrêtement des
+valeurs extrêmes, nécessaire pour stabiliser les moyennes, comprime
+mécaniquement le haut de la distribution. Tout indicateur de dispersion ou
+de concentration calculé sur ces données serait biaisé vers le bas.
+Les moyennes et médianes restent valides.
+
+% ==================================================================
+\section{Synthèse}
+
+\begin{center}
+\begin{tabular}{p{0.46\textwidth}p{0.46\textwidth}}
+\toprule
+\textbf{Décision} & \textbf{Fondement mesuré} \\
+\midrule
+Exclure les travailleurs horaires
+& 69\,\% de durées matériellement impossibles, contre 0,12\,\% chez les journaliers \\[0.25cm]
+Conserver les journaliers, convertis au mois
+& Durées cohérentes ; les exclure retirerait une population réelle \\[0.25cm]
+Convertir les journaliers à 22,4 jours et non 26
+& 22,4 est la moyenne annuelle hors dimanches et jours fériés ; 26 suppose six jours travaillés sur sept \\[0.25cm]
+Ne retirer que le niveau 3 des doublons signalés
+& Un signalement amont indique un doute ; la déduplication vérifiable (individu / employeur / mois) prend le relais \\[0.25cm]
+Retenir l'approche à deux étages
+& 65,3\,\% des salaires manquants sont en entreprise déclarante \\[0.25cm]
+Écrêter après conversion des périodicités
+& Avant conversion, le seuil bas (\num{510} FCFA) ne coupait rien \\[0.25cm]
+Imputer cinq fois plutôt qu'une
+& Les intervalles publiés doivent refléter l'incertitude d'imputation \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{0.6cm}
+
+\begin{retenir}
+Les lignes écartées le sont sur des motifs documentés et chiffrés, chacun
+vérifiable dans le journal d'exécution. Le filtre le plus lourd n'est plus
+le marquage produit en amont --- assoupli au seul niveau 3 --- mais la
+déduplication sur le triplet individu / employeur / mois, dont la règle
+peut être contrôlée directement sur les données.
+
+La chaîne s'exécute intégralement et les deux modèles de correction
+atteignent une qualité largement supérieure au seuil requis. Le point de
+vigilance sur la concentration des poids reste à arbitrer avant
+diffusion.
+\end{retenir}
+
+\vfill
+\noindent\rule{\textwidth}{0.4pt}\\
+{\footnotesize Toutes les valeurs chiffrées de cette note proviennent de
+l'exécution du traitement et du fichier d'audit associé. Elles sont
+reproductibles.}
+
+\end{document}

@@ -93,11 +93,21 @@ _FIRM_SIZE_REDUCED = [
     (201, 1_000_000, "Grande (201+)"),
 ]
 
+# Niveaux de la colonne TAG retires au filtre 2/5. Les niveaux 1, 2 et 4 sont
+# conserves : ils signalent une correspondance avec une autre ligne sans que
+# celle-ci constitue necessairement un double compte (cumul d'emplois chez des
+# employeurs distincts, reprise de contrat en cours de mois). Seul le niveau 3
+# est exclu. La deduplication sur ID_INDIV+ID_EMPLOYEUR+periode (filtre 3/5)
+# prend le relais contre les doubles comptes chez un meme employeur.
+_TAGS_EXCLUS = frozenset({"doublon_niv_3"})
+
 # Conventions de conversion journalier/horaire -> mensuel pour
 # SALAIRE_BRUT_ESTIME_AU_MOIS (memes hypotheses que audit.py::_check_analyse_salaire
 # et le notebook analyse_incoherences_salaires.ipynb, a garder alignees si modifiees).
-_JOURS_OUVRES_PAR_MOIS = 26
-_HEURES_PAR_MOIS = 208  # 26 jours x 8h
+# 22,4 jours ouvres : moyenne annuelle hors dimanches et jours feries, retenue de
+# preference a 26 qui correspond a un mois travaille six jours sur sept.
+_JOURS_OUVRES_PAR_MOIS = 22.4
+_HEURES_PAR_MOIS = 179.2  # 22,4 jours x 8h
 
 
 # ---------------------------------------------------------------------------
@@ -225,23 +235,27 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
 
     # TAG (deja calcule cote source) classe chaque ligne selon un niveau de
     # doublon detecte en amont ("unique", "doublon_niv_1".."doublon_niv_4").
-    # On ne garde que les lignes uniques : les niveaux de doublon partagent
-    # une cle de correspondance (probablement individu/employeur/periode)
-    # avec au moins une autre ligne du jeu de donnees et ne doivent pas etre
-    # comptes deux fois dans les traitements en aval.
+    # Seuls les niveaux listes dans _TAGS_EXCLUS sont retires : les autres
+    # niveaux sont conserves car ils correspondent a des situations legitimes
+    # (cumul d'emplois, reprise de contrat) et non a des doubles comptes.
+    # Le filtre 3/5, qui deduplique sur ID_INDIV+ID_EMPLOYEUR+periode, reste
+    # le garde-fou contre les doubles comptes chez un meme employeur.
     if "TAG" in df.columns:
         n_avant = df.height
         tag_counts = df["TAG"].value_counts().sort("count", descending=True)
-        df = df.filter(pl.col("TAG") == "unique")
+        df = df.filter(
+            pl.col("TAG").is_null() | ~pl.col("TAG").is_in(_TAGS_EXCLUS)
+        )
         n_retire = n_avant - df.height
         logger.info(
             "[Filtre 2/5 - Colonne TAG] Repartition avant filtre : {}",
             {row["TAG"]: row["count"] for row in tag_counts.iter_rows(named=True)},
         )
         logger.info(
-            "[Filtre 2/5 - Colonne TAG] Lignes non uniques (TAG != 'unique') exclues : "
-            "{} -> {} lignes ({} retirees, {:.2f}% du volume entrant)",
-            n_avant, df.height, n_retire, n_retire / n_avant * 100 if n_avant else 0.0,
+            "[Filtre 2/5 - Colonne TAG] Niveaux exclus {} (les autres niveaux sont "
+            "CONSERVES) : {} -> {} lignes ({} retirees, {:.2f}% du volume entrant)",
+            sorted(_TAGS_EXCLUS), n_avant, df.height, n_retire,
+            n_retire / n_avant * 100 if n_avant else 0.0,
         )
     else:
         logger.info("[Filtre 2/5 - Colonne TAG] Colonne absente, filtre ignore.")

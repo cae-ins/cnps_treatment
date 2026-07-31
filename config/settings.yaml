@@ -41,7 +41,7 @@ cleaning:
   # l'effectif, le rapport benefice/risque est defavorable.
   #
   # Journaliers (J) CONSERVES : leur DUREE_TRAVAILLEE est saine (0,12%
-  # d'incoherence) et la conversion x26 repose donc sur une base fiable.
+  # d'incoherence) et la conversion x22,4 repose donc sur une base fiable.
   # Ils representent 5,7% des salaires a periodicite connue -- les exclure
   # biaiserait la representativite vers les seuls emplois stables.
   # (Les 45,7% de "confusions" detectees sur J sont vraisemblablement des
