@@ -1125,7 +1125,7 @@ def _build_synthese_methodologie(
         "justification": (
             f"{duree_h:.1f}% des lignes horaires ont une DUREE_TRAVAILLEE "
             "incoherente : le montant declare n'est pas interpretable, et la "
-            "conversion en equivalent mensuel (x208) amplifierait l'erreur au lieu "
+            "conversion en equivalent mensuel amplifierait l'erreur au lieu "
             f"de la corriger. Ces lignes ne pesent que {vol_h:.1f}% des salaires "
             "renseignes."
             if duree_h is not None else "Mesure indisponible"

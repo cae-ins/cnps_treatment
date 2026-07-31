@@ -163,13 +163,53 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
 
     # --- Generation des M imputations ---
     X_missing = df_missing.select(features).to_pandas()
+
+    # Categories absentes de l'echantillon d'apprentissage : handle_unknown
+    # ="ignore" les encode en zeros, sans erreur. Leur imputation repose alors
+    # sur le seul intercept du modele, sans aucun effet propre a leur secteur
+    # ou a leur taille. Le fait est acceptable mais doit etre trace : ces
+    # entreprises recoivent l'imputation la moins informee du lot.
+    for col in cat_feats:
+        connues = set(df_declaring[col].drop_nulls().unique().to_list())
+        inconnues = df_missing.filter(
+            pl.col(col).is_not_null() & ~pl.col(col).is_in(list(connues))
+        )
+        if inconnues.height:
+            logger.warning(
+                "Imputation : {} couples entreprise-mois ({:.2f}%) ont une modalite "
+                "de '{}' absente des entreprises declarantes -- leur imputation "
+                "repose sur le seul intercept du modele",
+                inconnues.height, inconnues.height / df_missing.height * 100, col,
+            )
+
     y_hat = model.predict(X_missing)
 
+    # Bornes de plausibilite des salaires imputes.
+    # L'imputation porte sur log(salaire) : le bruit gaussien y est symetrique,
+    # mais l'exponentielle le rend fortement asymetrique en francs. Avec
+    # sigma ~ 0,57, un tirage a +3 ecarts-types multiplie la prediction par
+    # ~5,6. Sans borne, l'etape produit des salaires moyens d'entreprise sans
+    # rapport avec les donnees observees (jusqu'a plusieurs centaines de
+    # millions), qui contaminent ensuite les regles de Rubin.
+    # On borne sur la plage effectivement observee chez les declarantes, seule
+    # reference empirique disponible a ce stade.
+    obs = df_declaring["SALAIRE_MOYEN"].drop_nulls()
+    borne_basse = float(obs.min()) if obs.len() else None
+    borne_haute = float(obs.max()) if obs.len() else None
+
     imputed_frames: list[pl.DataFrame] = []
+    n_bornees = 0
     for m in range(M):
         noise = rng.normal(0, sigma_hat, size=len(y_hat))
         imputed_log_salary = y_hat + noise
         imputed_salary = np.exp(imputed_log_salary)
+
+        if borne_basse is not None and borne_haute is not None:
+            n_bornees += int(
+                ((imputed_salary < borne_basse) | (imputed_salary > borne_haute)).sum()
+            )
+            imputed_salary = np.clip(imputed_salary, borne_basse, borne_haute)
+            imputed_log_salary = np.log(imputed_salary)
 
         df_imp = df_missing.with_columns(
             pl.Series("SALAIRE_MOYEN", imputed_salary),
@@ -188,6 +228,16 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
         all_frames.append(full_m)
 
     result = pl.concat(all_frames, how="diagonal")
+
+    if n_bornees:
+        total_imputes = len(y_hat) * M
+        logger.info(
+            "Imputations ramenees dans la plage observee [{:.0f}, {:.0f}] : {} sur {} "
+            "({:.2f}%) -- l'exponentielle du bruit gaussien produit sinon des valeurs "
+            "sans rapport avec les salaires constates",
+            borne_basse, borne_haute, n_bornees, total_imputes,
+            n_bornees / total_imputes * 100,
+        )
 
     imputed_all = np.concatenate([f["SALAIRE_MOYEN"].to_numpy() for f in imputed_frames])
     logger.info(

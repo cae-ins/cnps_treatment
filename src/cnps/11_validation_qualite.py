@@ -102,7 +102,16 @@ def valider_donnees(cfg: PipelineConfig) -> ValidationReport:
                 "WARNING", "data", "missing_column", f"Colonne requise '{col}' absente",
             ))
 
-    salary_col = "SALAIRE_BRUT_MENS" if "SALAIRE_BRUT_MENS" in df.columns else "SALAIRE_BRUT"
+    # Meme ordre de preference que les etapes 04, 05, 09 et 10 : la validation
+    # doit porter sur la variable effectivement utilisee pour les estimations.
+    # SALAIRE_BRUT_MENS est une variable historique, non winsorisee et sans
+    # conversion de periodicite : la controler produisait des avertissements
+    # sur des valeurs qu'aucune etape n'exploite.
+    salary_col = next(
+        (c for c in ("SALAIRE_BRUT_ESTIME_AU_MOIS", "SALAIRE_BRUT_MENS", "SALAIRE_BRUT")
+         if c in df.columns),
+        "SALAIRE_BRUT",
+    )
     if salary_col in df.columns:
         lo, hi = cfg.estimation.salary_plausible_range
 

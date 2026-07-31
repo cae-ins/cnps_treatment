@@ -37,7 +37,7 @@ cleaning:
   # (feuille Analyse_Salaire, 23 fichiers) : sur 157 054 lignes horaires,
   # 65,5% presentent une confusion d'unite suspectee et 69,0% une
   # DUREE_TRAVAILLEE incoherente. La majorite n'est pas interpretable ;
-  # les convertir (x208) propagerait ces erreurs amplifiees. Pour 1,4% de
+  # les convertir au mois propagerait ces erreurs amplifiees. Pour 1,4% de
   # l'effectif, le rapport benefice/risque est defavorable.
   #
   # Journaliers (J) CONSERVES : leur DUREE_TRAVAILLEE est saine (0,12%

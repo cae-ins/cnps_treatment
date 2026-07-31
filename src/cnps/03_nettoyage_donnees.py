@@ -148,7 +148,7 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         (feuille ``Analyse_Salaire``) montre que 69% des lignes horaires ont
         une ``DUREE_TRAVAILLEE`` incoherente et 65,5% une confusion d'unite
         suspectee : les reintegrer propage ces erreurs, amplifiees par la
-        conversion x208.
+        conversion en equivalent mensuel.
 
         Le parametre YAML ``cleaning.exclude_employee_types`` n'est jamais
         modifie par ce flag : c'est un choix ponctuel pour l'execution en
@@ -335,9 +335,12 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     if "SALAIRE_BRUT" in df.columns:
         # Seuil de plausibilite du salaire, ventile par periodicite
         # (TYPE_SALARIE) des qu'un type non mensuel subsiste dans les donnees :
-        # un taux journalier de 3 000 FCFA est parfaitement plausible
-        # (~2 885 FCFA/jour attendu) mais serait exclu a tort par une
-        # comparaison directe au seuil mensuel (75 000).
+        # un taux journalier de quelques milliers de FCFA est parfaitement
+        # plausible mais serait exclu a tort par une comparaison directe au
+        # seuil mensuel (75 000). Le seuil journalier est le reciproque exact
+        # de la conversion (min_salary / _JOURS_OUVRES_PAR_MOIS) : un
+        # journalier paye au seuil atteint exactement le SMIG une fois
+        # ramene au mois.
         #
         # La condition ne peut PAS dependre du seul include_hj_estimated :
         # depuis que exclude_employee_types vaut ["H"] (les journaliers sont

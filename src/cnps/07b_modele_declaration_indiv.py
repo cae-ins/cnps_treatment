@@ -82,6 +82,10 @@ _NUMERIC_FEATURES = [
     # habituellement 30% de ses salaries n'a pas le meme comportement qu'une
     # autre a 95%. Calcule ci-dessous a partir de EFFECTIF_DECLARE (etape 05).
     "TAUX_COMPLETUDE_ENTREPRISE",
+    # Distingue "premiere observation de l'individu" (historique inexistant) de
+    # "jamais declare" (historique connu et negatif) : sans elle, les deux
+    # situations presentent les memes valeurs nulles remplies a zero.
+    "SANS_HISTORIQUE_INDIV",
 ]
 
 
@@ -124,8 +128,19 @@ def _ajouter_historique_individuel(df: pl.DataFrame) -> pl.DataFrame:
         .otherwise(0.0)
         .fill_null(0.0)
         .alias("TAUX_DECLARATION_PASSE_INDIV"),
+        # Sans cet indicateur, la premiere observation d'un individu serait
+        # indiscernable d'un salarie jamais declare : S_IJT_LAG et
+        # TAUX_DECLARATION_PASSE_INDIV valent 0 dans les deux cas. Le modele
+        # sous-estimerait alors sa probabilite d'etre declare et lui
+        # attribuerait un poids W_INDIV excessif.
+        (n_anterieurs == 0).cast(pl.Float64).alias("SANS_HISTORIQUE_INDIV"),
     )
-    logger.info("Historique individuel calcule : S_IJT_LAG, TAUX_DECLARATION_PASSE_INDIV")
+    n_sans = int(df.select(pl.col("SANS_HISTORIQUE_INDIV").sum()).item())
+    logger.info(
+        "Historique individuel calcule : S_IJT_LAG, TAUX_DECLARATION_PASSE_INDIV, "
+        "SANS_HISTORIQUE_INDIV ({} premieres observations, {:.2f}%)",
+        n_sans, n_sans / df.height * 100 if df.height else 0.0,
+    )
 
     # --- Contexte organisationnel : completude habituelle de l'entreprise ---
     # ATTENTION : le taux de completude du mois COURANT contient directement

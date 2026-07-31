@@ -81,7 +81,30 @@ def _prepare_features(
     if df_model.height != df.height:
         logger.info("Lignes sans D_JT exclues de l'ajustement : {} -> {}", df.height, df_model.height)
 
-    # Nulls numeriques -> 0 (la premiere periode n'a pas de valeur retardee)
+    # Indicateur d'absence d'historique. A la premiere periode du panel, les
+    # variables retardees sont nulles : il n'existe pas de mois anterieur.
+    # Les remplir a 0 sans le signaler ferait dire au modele "cette entreprise
+    # n'a pas declare le mois dernier", alors que l'information est absente et
+    # non negative. Le modele sous-estime alors leur propension a declarer et
+    # leur attribue des poids IPW gonflees. L'indicateur lui permet d'apprendre
+    # un intercept propre a ces lignes plutot que de les confondre avec des
+    # non-declarantes averees.
+    if num_feats:
+        manque_historique = pl.any_horizontal(
+            [pl.col(c).is_null() for c in num_feats]
+        ).cast(pl.Float64)
+        df_model = df_model.with_columns(manque_historique.alias("SANS_HISTORIQUE"))
+        n_sans = int(df_model.select(pl.col("SANS_HISTORIQUE").sum()).item())
+        if n_sans:
+            logger.info(
+                "Lignes sans historique (premiere periode du panel) : {} ({:.2f}%) "
+                "-- signalees au modele par SANS_HISTORIQUE plutot que confondues "
+                "avec des non-declarantes",
+                n_sans, n_sans / df_model.height * 100,
+            )
+            num_feats = [*num_feats, "SANS_HISTORIQUE"]
+
+    # Nulls numeriques -> 0, desormais accompagnes de l'indicateur ci-dessus
     for col in num_feats:
         df_model = df_model.with_columns(pl.col(col).fill_null(0.0))
 
