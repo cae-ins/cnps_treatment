@@ -2,65 +2,85 @@
 # Dimensions analytiques et definitions statistiques
 # =============================================================================
 # Chaque dimension definit un axe d'analyse pour le calcul des indicateurs.
-# Les classes definissent les regroupements pour les variables continues.
+# Les classes definissent les regroupements avec des bornes min et max inclusives.
 # =============================================================================
 
 # --- Dimensions d'analyse ---
 dimensions:
   global:
-    label: "National"
+    label: "National - cumul sur la periode"
     group_by: []
     enabled: true
 
+  monthly_global:
+    label: "National mensuel"
+    group_by: ["PERIOD"]
+    enabled: true
+
+  monthly_sector:
+    label: "Secteur d'activite mensuel"
+    group_by: ["PERIOD", "SECTEUR_ACTIVITE"]
+    enabled: true
+
+  monthly_sex:
+    label: "Sexe mensuel"
+    group_by: ["PERIOD", "SEXE"]
+    enabled: true
+
+  monthly_firm_size_reduced:
+    label: "Taille reduite mensuelle"
+    group_by: ["PERIOD", "CLASSE_EFFECTIF_REDUITE"]
+    enabled: true
+
   sector:
-    label: "Secteur d'activite"
+    label: "Secteur d'activite - cumul sur la periode"
     group_by: ["SECTEUR_ACTIVITE"]
     enabled: true
 
 
 
   age_employee:
-    label: "Tranche d'age des employes"
+    label: "Tranche d'age des employes - cumul sur la periode"
     group_by: ["CL_AGE_EMPLOYE"]
     enabled: true
     classes:
-      - { label: "Moins de 25 ans", min: 0, max: 25 }
-      - { label: "25-34 ans", min: 25, max: 35 }
-      - { label: "35-49 ans", min: 35, max: 50 }
+      - { label: "Moins de 25 ans", min: 0, max: 24 }
+      - { label: "25-34 ans", min: 25, max: 34 }
+      - { label: "35-49 ans", min: 35, max: 49 }
       - { label: "50 ans et plus", min: 50, max: 999 }
 
   seniority_firm:
-    label: "Anciennete dans l'entreprise"
+    label: "Anciennete dans l'entreprise - cumul sur la periode"
     group_by: ["CL_ANCIENNETE_ENTREPRISE"]
     enabled: true
     classes:
-      - { label: "Moins de 2 ans", min: 0, max: 2 }
-      - { label: "2-4 ans", min: 2, max: 5 }
-      - { label: "5-9 ans", min: 5, max: 10 }
+      - { label: "Moins de 2 ans", min: 0, max: 1 }
+      - { label: "2-4 ans", min: 2, max: 4 }
+      - { label: "5-9 ans", min: 5, max: 9 }
       - { label: "10 ans et plus", min: 10, max: 999 }
 
   seniority_registration:
-    label: "Anciennete d'immatriculation"
+    label: "Anciennete d'immatriculation - cumul sur la periode"
     group_by: ["CL_ANCIENNETE_IMMAT"]
     enabled: true
     classes:
-      - { label: "Moins de 2 ans", min: 0, max: 2 }
-      - { label: "2-4 ans", min: 2, max: 5 }
-      - { label: "5-9 ans", min: 5, max: 10 }
+      - { label: "Moins de 2 ans", min: 0, max: 1 }
+      - { label: "2-4 ans", min: 2, max: 4 }
+      - { label: "5-9 ans", min: 5, max: 9 }
       - { label: "10 ans et plus", min: 10, max: 999 }
 
   firm_age:
-    label: "Age de l'entreprise"
+    label: "Age de l'entreprise - cumul sur la periode"
     group_by: ["CL_AGE_ENTREPRISE"]
     enabled: true
     classes:
-      - { label: "Moins de 2 ans", min: 0, max: 2 }
-      - { label: "2-4 ans", min: 2, max: 5 }
-      - { label: "5-9 ans", min: 5, max: 10 }
+      - { label: "Moins de 2 ans", min: 0, max: 1 }
+      - { label: "2-4 ans", min: 2, max: 4 }
+      - { label: "5-9 ans", min: 5, max: 9 }
       - { label: "10 ans et plus", min: 10, max: 999 }
 
   firm_size:
-    label: "Taille de l'entreprise (detaille)"
+    label: "Taille de l'entreprise (detaille) - cumul sur la periode"
     group_by: ["CLASSE_EFFECTIF"]
     enabled: true
     classes:
@@ -76,7 +96,7 @@ dimensions:
       - { label: "Plus de 1000 salaries", min: 1001, max: 999999 }
 
   firm_size_reduced:
-    label: "Taille de l'entreprise (reduit)"
+    label: "Taille de l'entreprise (reduit) - cumul sur la periode"
     group_by: ["CLASSE_EFFECTIF_REDUITE"]
     enabled: true
     classes:
@@ -86,36 +106,35 @@ dimensions:
       - { label: "Grande (201+)", min: 201, max: 999999 }
 
   sex:
-    label: "Sexe"
+    label: "Sexe - cumul sur la periode"
     group_by: ["SEXE"]
     enabled: true
 
   commune:
-    label: "Commune"
+    label: "Commune - cumul sur la periode"
     group_by: ["COMMUNE"]
     enabled: true
 
   csp:
-    label: "Categorie socio-professionnelle"
+    label: "Categorie socio-professionnelle - cumul sur la periode"
     group_by: ["CSP"]
     enabled: true
 
   profession:
-    label: "Profession"
+    label: "Profession - cumul sur la periode"
     group_by: ["PROFESSION"]
     enabled: true
 
 # --- Statistiques a calculer ---
 statistics:
-  - { name: "n_obs", label: "Effectif non pondere", function: "count" }
-  - { name: "n_weighted", label: "Effectif pondere", function: "weighted_count" }
-  - { name: "mean", label: "Salaire moyen", function: "weighted_mean" }
-  - { name: "variance", label: "Variance", function: "weighted_variance" }
-  - { name: "min", label: "Minimum", function: "min" }
-  - { name: "p10", label: "1er decile", function: "weighted_quantile", params: { q: 0.10 } }
-  - { name: "q1", label: "1er quartile", function: "weighted_quantile", params: { q: 0.25 } }
-  - { name: "median", label: "Mediane", function: "weighted_quantile", params: { q: 0.50 } }
-  - { name: "q3", label: "3eme quartile", function: "weighted_quantile", params: { q: 0.75 } }
-  - { name: "p90", label: "9eme decile", function: "weighted_quantile", params: { q: 0.90 } }
-  - { name: "max", label: "Maximum", function: "max" }
-  - { name: "gini", label: "Coefficient de Gini", function: "gini" }
+  - { name: "n_obs", label: "Effectif observe", function: "count", variable: "SALAIRE_BRUT_ESTIME_AU_MOIS" }
+  - { name: "mean", label: "Salaire moyen", function: "weighted_mean", variable: "SALAIRE_BRUT_ESTIME_AU_MOIS_W" }
+  - { name: "variance", label: "Variance", function: "weighted_variance", variable: "SALAIRE_BRUT_ESTIME_AU_MOIS_W" }
+  - { name: "min", label: "Minimum observe", function: "min", variable: "SALAIRE_BRUT_ESTIME_AU_MOIS" }
+  - { name: "p10", label: "1er decile", function: "weighted_quantile", variable: "SALAIRE_BRUT_ESTIME_AU_MOIS", params: { q: 0.10 } }
+  - { name: "q1", label: "1er quartile", function: "weighted_quantile", variable: "SALAIRE_BRUT_ESTIME_AU_MOIS", params: { q: 0.25 } }
+  - { name: "median", label: "Mediane", function: "weighted_quantile", variable: "SALAIRE_BRUT_ESTIME_AU_MOIS", params: { q: 0.50 } }
+  - { name: "q3", label: "3eme quartile", function: "weighted_quantile", variable: "SALAIRE_BRUT_ESTIME_AU_MOIS", params: { q: 0.75 } }
+  - { name: "p90", label: "9eme decile", function: "weighted_quantile", variable: "SALAIRE_BRUT_ESTIME_AU_MOIS", params: { q: 0.90 } }
+  - { name: "max", label: "Maximum observe", function: "max", variable: "SALAIRE_BRUT_ESTIME_AU_MOIS" }
+  - { name: "gini", label: "Coefficient de Gini", function: "gini", variable: "SALAIRE_BRUT_ESTIME_AU_MOIS" }

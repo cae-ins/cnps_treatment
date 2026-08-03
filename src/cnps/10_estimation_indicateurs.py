@@ -2,16 +2,18 @@
 Etape 10/12 — Estimation des indicateurs.
 
 Calcule toutes les statistiques configurees sur toutes les dimensions
-d'analyse, en combinant si necessaire les resultats des imputations
-multiples (etape 8) via les regles de combinaison de Rubin.
+d'analyse a partir des repondants et des poids IPW a deux etages.
 
-Ce module regroupe trois responsabilites :
+Ce module regroupe deux responsabilites de publication :
 1. Estimateurs ponderes (moyenne, variance, quantile, Gini) — utilises
    pour chaque cellule dimension x groupe.
-2. Combinaison de Rubin — fusionne les M estimations issues des jeux
-   de donnees imputes en un estimateur unique avec intervalle de confiance.
-3. Moteur d'estimation — orchestre le calcul sur toutes les dimensions
+2. Moteur d'estimation — orchestre le calcul sur toutes les dimensions
    et applique les regles de suppression des petites cellules.
+
+Les helpers de Rubin restent disponibles pour les tests historiques, mais ne
+sont pas appeles par le DAG. Aucune variance ni aucun intervalle n'est diffuse
+tant que la linearisation conjointe des deux modeles de reponse (lot F.1)
+n'est pas specifiee et validee.
 
 References
 ----------
@@ -29,7 +31,6 @@ Lumley, T. (2010). *Complex Surveys: A Guide to Analysis Using R*. Wiley.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 
 import numpy as np
@@ -47,7 +48,7 @@ from cnps.storage import object_exists, read_parquet
 
 
 def weighted_mean(y: NDArray[np.float64], w: NDArray[np.float64]) -> float:
-    """Estimateur de la moyenne ponderee de Horvitz-Thompson."""
+    """Estimateur ratio de la moyenne ponderee de Hajek."""
     mask = np.isfinite(y) & np.isfinite(w) & (w > 0)
     if not mask.any():
         return np.nan
@@ -56,8 +57,12 @@ def weighted_mean(y: NDArray[np.float64], w: NDArray[np.float64]) -> float:
 
 def weighted_variance(y: NDArray[np.float64], w: NDArray[np.float64]) -> float:
     """
-    Variance ponderee avec correction de Bessel (formule des poids de
-    fiabilite, Kish 1965) :
+    Variance descriptive ponderee des valeurs avec correction de Kish.
+
+    Cette quantite decrit la dispersion des salaires. Elle n'est pas la
+    variance de l'estimateur de moyenne, qui doit etre calculee separement.
+
+    Formule des poids de fiabilite (Kish 1965) :
     V = (sum_w / (sum_w^2 - sum_w2)) * sum(w * (y - mu)^2)
     """
     mask = np.isfinite(y) & np.isfinite(w) & (w > 0)
@@ -67,8 +72,8 @@ def weighted_variance(y: NDArray[np.float64], w: NDArray[np.float64]) -> float:
     y_m, w_m = y[mask], w[mask]
     mu = np.sum(w_m * y_m) / np.sum(w_m)
     sum_w = np.sum(w_m)
-    sum_w2 = np.sum(w_m ** 2)
-    denom = sum_w ** 2 - sum_w2
+    sum_w2 = np.sum(w_m**2)
+    denom = sum_w**2 - sum_w2
 
     if denom <= 0:
         return np.nan
@@ -166,6 +171,7 @@ def compute_statistic(
 @dataclass
 class RubinResult:
     """Resultat de la combinaison de Rubin."""
+
     estimate: float
     std_error: float
     ci_lower: float
@@ -175,7 +181,36 @@ class RubinResult:
     between_var: float
     total_var: float
     n_imputations: int
-    fmi: float            # fraction d'information manquante
+    fmi: float  # fraction d'information manquante
+
+
+def _has_valid_rubin_interval(
+    result: RubinResult,
+    *,
+    declared_degenerate: bool = False,
+) -> bool:
+    """Indique si un intervalle de Rubin peut etre diffuse."""
+    numeric_parts = (
+        result.total_var,
+        result.std_error,
+        result.ci_lower,
+        result.ci_upper,
+    )
+    if not all(np.isfinite(value) for value in numeric_parts):
+        return False
+    if (
+        result.total_var < 0
+        or result.std_error < 0
+        or result.ci_lower < 0
+        or result.ci_upper < 0
+        or result.ci_upper < result.ci_lower
+    ):
+        return False
+
+    zero_width = (
+        result.total_var == 0 or result.std_error == 0 or result.ci_upper == result.ci_lower
+    )
+    return declared_degenerate or not zero_width
 
 
 def combine_rubin(
@@ -196,12 +231,22 @@ def combine_rubin(
         Niveau de confiance de l'intervalle (0.95 par defaut).
     """
     M = len(estimates)
+    if len(variances) != M:
+        raise ValueError("Les listes d'estimations et de variances doivent avoir la meme longueur.")
+    if not 0 < confidence_level < 1:
+        raise ValueError("Le niveau de confiance doit etre strictement compris entre 0 et 1.")
     if M == 0:
         return RubinResult(
-            estimate=np.nan, std_error=np.nan,
-            ci_lower=np.nan, ci_upper=np.nan,
-            df=np.nan, within_var=np.nan, between_var=np.nan,
-            total_var=np.nan, n_imputations=0, fmi=np.nan,
+            estimate=np.nan,
+            std_error=np.nan,
+            ci_lower=np.nan,
+            ci_upper=np.nan,
+            df=np.nan,
+            within_var=np.nan,
+            between_var=np.nan,
+            total_var=np.nan,
+            n_imputations=0,
+            fmi=np.nan,
         )
 
     Q = np.array(estimates)
@@ -227,7 +272,7 @@ def combine_rubin(
 
         fmi = float((B + B / M) / T) if T > 0 else 0.0
 
-    se = np.sqrt(max(T, 0))
+    se = float(np.sqrt(T)) if np.isfinite(T) and T >= 0 else np.nan
     alpha = 1 - confidence_level
 
     if np.isfinite(df) and df > 0:
@@ -239,9 +284,16 @@ def combine_rubin(
     ci_upper = Q_bar + t_crit * se
 
     return RubinResult(
-        estimate=Q_bar, std_error=se, ci_lower=ci_lower, ci_upper=ci_upper,
-        df=df, within_var=U_bar, between_var=B, total_var=T,
-        n_imputations=M, fmi=fmi,
+        estimate=Q_bar,
+        std_error=se,
+        ci_lower=ci_lower,
+        ci_upper=ci_upper,
+        df=df,
+        within_var=U_bar,
+        between_var=B,
+        total_var=T,
+        n_imputations=M,
+        fmi=fmi,
     )
 
 
@@ -250,29 +302,110 @@ def combine_rubin(
 # ---------------------------------------------------------------------------
 
 
+def _disclosure_status(
+    df: pl.DataFrame,
+    cfg: PipelineConfig,
+    weight_col: str,
+) -> tuple[str, float]:
+    """Applique les seuils primaires sur les contributeurs reels."""
+    required = {
+        "ID_INDIV",
+        "ID_EMPLOYEUR",
+        "SALAIRE_BRUT_ESTIME_AU_MOIS",
+        weight_col,
+    }
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError("Secret statistique impossible, colonnes absentes: " + ", ".join(missing))
+
+    contributors = df.filter(
+        pl.col(weight_col).is_finite()
+        & (pl.col(weight_col) > 0)
+        & pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS").is_finite()
+        & (pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS") > 0)
+    )
+    individuals = contributors["ID_INDIV"].drop_nulls().n_unique()
+    employers = contributors["ID_EMPLOYEUR"].drop_nulls().n_unique()
+    wage_mass = (
+        contributors.filter(pl.col("ID_EMPLOYEUR").is_not_null())
+        .group_by("ID_EMPLOYEUR")
+        .agg(pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS").sum().alias("_MASSE"))
+    )
+    total_mass = float(wage_mass["_MASSE"].sum() or 0.0) if wage_mass.height else 0.0
+    top_share = (
+        float(wage_mass["_MASSE"].max()) / total_mass
+        if total_mass > 0 and wage_mass.height
+        else 1.0
+    )
+
+    reasons = []
+    if individuals < cfg.estimation.min_distinct_individuals:
+        reasons.append("individus")
+    if employers < cfg.estimation.min_distinct_employers:
+        reasons.append("employeurs")
+    if top_share > cfg.estimation.max_employer_wage_share:
+        reasons.append("dominance")
+    status = "primaire:" + ",".join(reasons) if reasons else "publiee"
+    return status, total_mass
+
+
+def _mask_statistics(row: dict, statistics: list[StatDef]) -> None:
+    for stat in statistics:
+        row[stat.name] = None
+
+
+def _apply_secondary_suppression(
+    rows: list[dict],
+    statistics: list[StatDef],
+) -> None:
+    """Masque une seconde cellule dans chaque marge additive concernee."""
+    partitions: dict[str, list[dict]] = {}
+    for row in rows:
+        key = str(row.get("_secondary_partition", "__all__"))
+        partitions.setdefault(key, []).append(row)
+
+    for partition_rows in partitions.values():
+        primary = [
+            row for row in partition_rows if str(row["suppression_status"]).startswith("primaire:")
+        ]
+        candidates = [row for row in partition_rows if row["suppression_status"] == "publiee"]
+        if len(primary) != 1 or not candidates:
+            continue
+        secondary = min(
+            candidates,
+            key=lambda row: (float(row["_wage_mass_observed"]), str(row["group"])),
+        )
+        _mask_statistics(secondary, statistics)
+        secondary["suppression_status"] = "secondaire"
+
+
 def _estimate_group(
     df: pl.DataFrame,
-    salary_col: str,
     weight_col: str,
     statistics: list[StatDef],
-    min_cell: int,
-) -> dict[str, float | None]:
+    cfg: PipelineConfig,
+) -> dict[str, object]:
     """Calcule toutes les statistiques pour un groupe (une cellule)."""
-    y = df[salary_col].to_numpy().astype(float)
+    if weight_col not in df.columns:
+        raise ValueError(f"Colonne {weight_col} absente: executer l'etape 09 avant l'estimation.")
     w = df[weight_col].to_numpy().astype(float)
+    status, wage_mass = _disclosure_status(df, cfg, weight_col)
+    results: dict[str, object] = {
+        "suppression_status": status,
+        "inference_status": "POINT_ONLY_F1_PENDING",
+        "_wage_mass_observed": wage_mass,
+    }
+    if status != "publiee":
+        _mask_statistics(results, statistics)
+        return results
 
-    n_weighted = float(np.sum(w[np.isfinite(y) & (w > 0)]))
-
-    # Suppression si sous la taille minimale de cellule
-    if n_weighted < min_cell:
-        return {s.name: None for s in statistics}
-
-    results: dict[str, float | None] = {}
     for stat in statistics:
-        try:
-            results[stat.name] = compute_statistic(stat.function, y, w, stat.params)
-        except Exception:
-            results[stat.name] = None
+        if stat.variable not in df.columns:
+            raise ValueError(
+                f"Variable '{stat.variable}' absente pour la statistique '{stat.name}'."
+            )
+        y = df[stat.variable].to_numpy().astype(float)
+        results[stat.name] = compute_statistic(stat.function, y, w, stat.params)
 
     return results
 
@@ -280,16 +413,15 @@ def _estimate_group(
 def _estimate_dimension(
     df: pl.DataFrame,
     dim: DimensionDef,
-    salary_col: str,
     weight_col: str,
     statistics: list[StatDef],
-    min_cell: int,
+    cfg: PipelineConfig,
 ) -> list[dict]:
     """Calcule les statistiques pour tous les groupes d'une dimension."""
     rows: list[dict] = []
 
     if not dim.group_by:
-        results = _estimate_group(df, salary_col, weight_col, statistics, min_cell)
+        results = _estimate_group(df, weight_col, statistics, cfg)
         rows.append({"dimension": dim.label, "group": "Total", **results})
         return rows
 
@@ -299,206 +431,36 @@ def _estimate_dimension(
         return rows
 
     for group_vals, group_df in df.group_by(group_cols):
-        group_label = " / ".join(str(v) for v in group_vals) if isinstance(group_vals, tuple) \
+        group_label = (
+            " / ".join(str(v) for v in group_vals)
+            if isinstance(group_vals, tuple)
             else str(group_vals)
-        results = _estimate_group(group_df, salary_col, weight_col, statistics, min_cell)
-        rows.append({"dimension": dim.label, "group": group_label, **results})
+        )
+        partition_values = (
+            group_vals[:-1] if isinstance(group_vals, tuple) and len(group_cols) > 1 else ()
+        )
+        partition = " / ".join(str(v) for v in partition_values) or "__all__"
+        results = _estimate_group(group_df, weight_col, statistics, cfg)
+        rows.append(
+            {
+                "dimension": dim.label,
+                "group": group_label,
+                "_secondary_partition": partition,
+                **results,
+            }
+        )
 
+    _apply_secondary_suppression(rows, statistics)
     return rows
-
-
-def _joindre_imputation_sur_individus(
-    analytical: pl.DataFrame,
-    imputed_m: pl.DataFrame,
-    salary_col: str,
-) -> tuple[pl.DataFrame, str]:
-    """
-    Reporte le salaire moyen impute d'une imputation ``m`` sur les lignes
-    individuelles, et construit la variable de salaire a estimer.
-
-    Regle : pour un salarie dont le salaire est reellement declare, on garde sa
-    valeur observee. Pour les autres, on utilise le salaire moyen de son
-    entreprise ce mois-la -- observe si l'entreprise a declare, impute par
-    l'etape 08 sinon. Substituer une valeur imputee a un salaire observe serait
-    une perte d'information ; c'est exactement ce que l'annexe 3 reproche a
-    l'annexe 2 sur les declarations partielles.
-
-    Returns
-    -------
-    (DataFrame, str)
-        La base enrichie et le nom de la colonne de salaire a utiliser.
-    """
-    join_cols = [
-        c for c in ("ID_EMPLOYEUR", "PERIOD")
-        if c in analytical.columns and c in imputed_m.columns
-    ]
-    if len(join_cols) < 2 or "SALAIRE_MOYEN" not in imputed_m.columns:
-        logger.warning(
-            "Jointure impossible sur les imputations (cles={}, SALAIRE_MOYEN={}). "
-            "Estimation sur le salaire observe uniquement.",
-            join_cols, "SALAIRE_MOYEN" in imputed_m.columns,
-        )
-        return analytical, salary_col
-
-    df = analytical.join(
-        imputed_m.select(join_cols + ["SALAIRE_MOYEN"]).rename(
-            {"SALAIRE_MOYEN": "_SAL_MOYEN_IMP"}
-        ),
-        on=join_cols,
-        how="left",
-    )
-
-    observe = (
-        pl.col(salary_col).is_not_null() & (pl.col(salary_col) > 0)
-        if salary_col in df.columns
-        else pl.lit(False)
-    )
-    df = df.with_columns(
-        pl.when(observe)
-        .then(pl.col(salary_col))
-        .otherwise(pl.col("_SAL_MOYEN_IMP"))
-        .alias("_SALAIRE_ESTIME")
-    ).drop("_SAL_MOYEN_IMP")
-
-    return df, "_SALAIRE_ESTIME"
-
-
-def _estimate_with_imputations(
-    cfg: PipelineConfig,
-    imputed_object: str,
-    analytical_object: str,
-    salary_col: str,
-    weight_col: str,
-    min_cell: int,
-    statistics: list[StatDef],
-    enabled_dims: list[DimensionDef],
-) -> pl.DataFrame:
-    """
-    Estime avec combinaison de Rubin sur les imputations multiples.
-
-    L'estimation se fait au niveau **individuel** (base analytique), pondere par
-    ``W_FINAL`` = W_JT x W_INDIV, et non au niveau entreprise.
-
-    Pourquoi : ``firm_base_imputed`` est agrege par entreprise-mois et ne porte
-    ni ``W_FINAL``, ni ``W_INDIV``, ni ``S_IJT``. Estimer directement dessus
-    reviendrait a ignorer le second etage de l'annexe 3 (la correction de la
-    non-declaration partielle, etape 07b) et a retomber sur une ponderation
-    ``W_JT`` seule, c'est-a-dire sur l'annexe 2 -- alors que 65,3% des salaires
-    manquants sont justement dans des entreprises ayant declare partiellement.
-    Les salaires imputes sont donc **joints** sur les lignes individuelles
-    plutot que d'etre estimes tels quels.
-    """
-    imputed = read_parquet(cfg.minio, cfg.minio.cleaned_bucket, imputed_object)
-    analytical = read_parquet(cfg.minio, cfg.minio.cleaned_bucket, analytical_object)
-
-    if weight_col not in analytical.columns:
-        fallback_w = "W_JT" if "W_JT" in analytical.columns else None
-        logger.warning(
-            "Colonne de poids '{}' absente de la base analytique : repli sur '{}'. "
-            "Verifier que l'etape 09 a bien ete executee.",
-            weight_col, fallback_w or "1.0",
-        )
-        if fallback_w:
-            weight_col = fallback_w
-        else:
-            analytical = analytical.with_columns(pl.lit(1.0).alias(weight_col))
-
-    if "IMPUTATION_ID" not in imputed.columns:
-        logger.warning("Aucun IMPUTATION_ID trouve, traite comme imputation unique")
-        imputed = imputed.with_columns(pl.lit(1).cast(pl.Int32).alias("IMPUTATION_ID"))
-
-    m_values = sorted(imputed["IMPUTATION_ID"].unique().to_list())
-    M = len(m_values)
-    logger.info(
-        "Combinaison de {} imputations via les regles de Rubin, au niveau individuel "
-        "({} lignes, poids '{}')",
-        M, analytical.height, weight_col,
-    )
-
-    imputation_results: list[list[dict]] = []
-
-    for m in m_values:
-        imputed_m = imputed.filter(pl.col("IMPUTATION_ID") == m)
-        df_m, s_col = _joindre_imputation_sur_individus(analytical, imputed_m, salary_col)
-
-        if s_col not in df_m.columns:
-            logger.warning("Imputation {} : aucune colonne de salaire exploitable", m)
-            continue
-
-        n_estimables = int(df_m[s_col].is_not_null().sum())
-        logger.debug(
-            "Imputation {}/{} : {} lignes avec salaire (observe ou impute) sur {}",
-            m, M, n_estimables, df_m.height,
-        )
-
-        rows_m: list[dict] = []
-        for dim in enabled_dims:
-            rows_m.extend(
-                _estimate_dimension(df_m, dim, s_col, weight_col, statistics, min_cell)
-            )
-
-        imputation_results.append(rows_m)
-
-    if not imputation_results:
-        return pl.DataFrame()
-
-    # Regroupe par (dimension, groupe) -> {nom_stat: [valeurs par imputation]}
-    combined: dict[tuple[str, str], dict[str, list[float]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
-    for rows_m in imputation_results:
-        for row in rows_m:
-            key = (row["dimension"], row["group"])
-            for stat in statistics:
-                val = row.get(stat.name)
-                if val is not None:
-                    combined[key][stat.name].append(val)
-
-    final_rows: list[dict] = []
-    n_rubin = 0
-    n_fallback_mean = 0
-    for (dim_label, group), stat_values in combined.items():
-        row = {"dimension": dim_label, "group": group}
-        for stat in statistics:
-            vals = stat_values.get(stat.name, [])
-            if len(vals) == M:
-                # Regles de Rubin (variance intra-imputation simplifiee a 0 : pas de bootstrap intra)
-                variances = [0.0] * len(vals)
-                rubin = combine_rubin(vals, variances, cfg.estimation.confidence_level)
-                row[stat.name] = rubin.estimate
-                row[f"{stat.name}_ci_lower"] = rubin.ci_lower
-                row[f"{stat.name}_ci_upper"] = rubin.ci_upper
-                n_rubin += 1
-            elif vals:
-                # Certaines imputations n'ont pas produit cette statistique
-                # (cellule supprimee pour n_weighted < min_cell dans au moins
-                # une imputation) : repli sur une simple moyenne, sans IC.
-                row[stat.name] = float(np.mean(vals))
-                n_fallback_mean += 1
-            else:
-                row[stat.name] = None
-        final_rows.append(row)
-
-    if n_fallback_mean > 0:
-        logger.warning(
-            "{} statistiques combinees par moyenne simple (pas de {} imputations completes, "
-            "pas d'intervalle de confiance) sur {} au total",
-            n_fallback_mean, M, n_rubin + n_fallback_mean,
-        )
-
-    result = pl.DataFrame(final_rows)
-    logger.info("Estimation par Rubin terminee : {} lignes, {} colonnes ({} groupes distincts)",
-                result.height, result.width, len(combined))
-    return result
 
 
 def estimer_indicateurs(cfg: PipelineConfig) -> pl.DataFrame:
     """
     Calcule l'ensemble des statistiques sur toutes les dimensions d'analyse.
 
-    Si des imputations multiples existent (etape 8), les estimations sont
-    combinees via les regles de Rubin. Sinon, l'estimation est faite
-    directement sur la base analytique.
+    Le chemin de publication utilise uniquement les repondants ponderes par
+    IPW a deux etages. L'imputation et les regles de Rubin en sont exclues.
+    Tant que F.1 n'est pas valide, seules les estimations ponctuelles sortent.
 
     Parameters
     ----------
@@ -512,59 +474,53 @@ def estimer_indicateurs(cfg: PipelineConfig) -> pl.DataFrame:
     """
     bucket = cfg.minio.cleaned_bucket
     analytical_object = f"{cfg.minio.cleaned_prefix}analytical_base.parquet"
-    imputed_object = f"{cfg.minio.cleaned_prefix}firm_base_imputed.parquet"
-
-    # Variable de salaire de reference, alignee sur les etapes 04 (S_IJT) et 05
-    # (agregation entreprise) : voir le commentaire de 05_base_entreprises.py.
-    # Resolue plus bas contre les colonnes reellement presentes.
-    salary_col = "SALAIRE_BRUT_ESTIME_AU_MOIS"
     weight_col = "W_FINAL"
-    min_cell = cfg.estimation.min_cell_size
     statistics = cfg.statistics
     enabled_dims = [d for d in cfg.dimensions if d.enabled]
 
-    logger.info("Taille minimale de cellule (secret statistique) : {}", min_cell)
+    logger.info(
+        "Secret statistique: au moins {} individus et {} employeurs; "
+        "part salariale maximale d'un employeur {:.1%}.",
+        cfg.estimation.min_distinct_individuals,
+        cfg.estimation.min_distinct_employers,
+        cfg.estimation.max_employer_wage_share,
+    )
 
     if not object_exists(cfg.minio, bucket, analytical_object):
         raise FileNotFoundError(f"Base analytique introuvable : {bucket}/{analytical_object}")
 
     df = read_parquet(cfg.minio, bucket, analytical_object)
+    required_variables = {weight_col, *(stat.variable for stat in statistics)}
+    missing = sorted(required_variables - set(df.columns))
+    if missing:
+        raise ValueError("Colonnes d'estimation absentes: " + ", ".join(missing))
 
-    # Resolution de la colonne de salaire AVANT l'aiguillage, pour que les deux
-    # chemins (avec ou sans imputations) utilisent la meme variable.
-    if salary_col not in df.columns:
-        fallback = next(
-            (c for c in ("SALAIRE_BRUT_MENS", "SALAIRE_BRUT") if c in df.columns), None
-        )
-        if fallback is None:
-            raise ValueError("Aucune colonne de salaire trouvee dans la base analytique")
-        logger.info("Colonne '{}' absente, repli sur '{}'", salary_col, fallback)
-        salary_col = fallback
-
-    # L'estimation part toujours de la base analytique (niveau individuel,
-    # porteuse de W_FINAL). Les imputations de l'etape 08 y sont jointes plutot
-    # que d'etre estimees a leur propre niveau -- cf. _estimate_with_imputations.
-    if object_exists(cfg.minio, bucket, imputed_object):
-        logger.info("Imputations multiples detectees, utilisation des regles de Rubin")
-        return _estimate_with_imputations(
-            cfg, imputed_object, analytical_object, salary_col, weight_col,
-            min_cell, statistics, enabled_dims,
-        )
-
-    logger.info("Estimation de {} statistiques sur {} dimensions ({} lignes, salaire '{}')",
-                len(statistics), len(enabled_dims), df.height, salary_col)
+    logger.info(
+        "Estimation ponctuelle de {} statistiques sur {} dimensions ({} lignes).",
+        len(statistics),
+        len(enabled_dims),
+        df.height,
+    )
 
     all_rows: list[dict] = []
     n_suppressed = 0
     for dim in enabled_dims:
-        rows = _estimate_dimension(df, dim, salary_col, weight_col, statistics, min_cell)
+        rows = _estimate_dimension(df, dim, weight_col, statistics, cfg)
         all_rows.extend(rows)
         n_suppressed += sum(1 for r in rows if all(r.get(s.name) is None for s in statistics))
         logger.debug("  {} '{}': {} groupes", dim.name, dim.label, len(rows))
 
+    for row in all_rows:
+        row.pop("_wage_mass_observed", None)
+        row.pop("_secondary_partition", None)
     result = pl.DataFrame(all_rows)
-    logger.info("Estimation terminee : {} lignes, {} colonnes ({} cellules supprimees pour n < {})",
-                result.height, result.width, n_suppressed, min_cell)
+    logger.info(
+        "Estimation terminee : {} lignes, {} colonnes, {} cellules masquees. "
+        "Aucun intervalle n'est diffuse (F.1 en attente).",
+        result.height,
+        result.width,
+        n_suppressed,
+    )
     return result
 
 
@@ -592,7 +548,10 @@ if __name__ == "__main__":
     )
     logger.add(
         str(cfg.paths.logs / f"{Path(__file__).stem}.log"),
-        level="DEBUG", rotation="10 MB", retention="30 days", encoding="utf-8",
+        level="DEBUG",
+        rotation="10 MB",
+        retention="30 days",
+        encoding="utf-8",
     )
 
     try:

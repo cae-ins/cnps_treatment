@@ -13,7 +13,7 @@ Ce module expose :
 
 - Des primitives bas niveau sur des octets bruts (lecture, ecriture,
   existence, listing) qui ne connaissent aucun format de fichier.
-- Des helpers types par format (parquet, pickle, excel, json), construits
+- Des helpers types par format (parquet, excel, json), construits
   sur les primitives ci-dessus, qui passent par un buffer memoire
   (``io.BytesIO``) : aucun fichier temporaire n'est jamais cree sur disque.
 
@@ -27,9 +27,9 @@ from __future__ import annotations
 
 import io
 import json
-import pickle
+import math
 from collections.abc import Callable
-from typing import Any
+from numbers import Real
 
 import polars as pl
 from loguru import logger
@@ -44,6 +44,7 @@ _NOT_FOUND_CODES = {"NoSuchKey", "NoSuchObject"}
 # ---------------------------------------------------------------------------
 # Primitives bas niveau (octets bruts)
 # ---------------------------------------------------------------------------
+
 
 def get_client(cfg: MinioConfig) -> Minio:
     """Construit un client MinIO a partir des parametres de connexion."""
@@ -120,6 +121,7 @@ def delete_object(cfg: MinioConfig, bucket: str, object_name: str) -> None:
 # Helpers types par format
 # ---------------------------------------------------------------------------
 
+
 def read_parquet(cfg: MinioConfig, bucket: str, object_name: str) -> pl.DataFrame:
     """Lit un objet Parquet MinIO directement en DataFrame Polars."""
     data = read_bytes(cfg, bucket, object_name)
@@ -137,18 +139,6 @@ def write_parquet(
     """Ecrit un DataFrame Polars vers un objet Parquet MinIO."""
     buf = io.BytesIO()
     df.write_parquet(buf, compression=compression)
-    write_bytes(cfg, bucket, object_name, buf.getvalue())
-
-
-def read_pickle(cfg: MinioConfig, bucket: str, object_name: str) -> Any:
-    """Charge un objet Python serialise (pickle) depuis MinIO."""
-    return pickle.loads(read_bytes(cfg, bucket, object_name))
-
-
-def write_pickle(cfg: MinioConfig, bucket: str, object_name: str, obj: Any) -> None:
-    """Serialise (pickle) un objet Python et l'envoie vers MinIO."""
-    buf = io.BytesIO()
-    pickle.dump(obj, buf)
     write_bytes(cfg, bucket, object_name, buf.getvalue())
 
 
@@ -189,7 +179,25 @@ def read_json(cfg: MinioConfig, bucket: str, object_name: str) -> dict:
     return json.loads(read_bytes(cfg, bucket, object_name).decode("utf-8"))
 
 
+def _json_safe(value):
+    """Convertit recursivement les nombres non finis en null JSON."""
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, Real):
+        return float(value) if math.isfinite(float(value)) else None
+    return value
+
+
 def write_json(cfg: MinioConfig, bucket: str, object_name: str, data: dict) -> None:
     """Encode un dict en JSON et l'envoie vers MinIO."""
-    payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+    payload = json.dumps(
+        _json_safe(data),
+        indent=2,
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
     write_bytes(cfg, bucket, object_name, payload, content_type="application/json")

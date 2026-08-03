@@ -19,12 +19,13 @@ periode t, et X_jt comprend :
 - Indicateur de declaration retarde (D_{j,t-1})
 - Taux de declaration cumule passe
 
-Calcul des poids IPW
+Calcul du facteur IPW
 ---------------------
 w_jt = 1 / max(p_hat_jt, epsilon)
 
-Poids stabilises (Robins et al., 2000) :
-w_jt^s = P(D=1) / max(p_hat_jt, epsilon)
+Ce facteur n'est pas stabilise par une probabilite marginale. Le facteur
+entreprise n'est pas diffuse seul : l'etape 09 construit le poids final
+R_ijt/(p_hat_jt*q_hat_ijt), puis applique la troncature configuree.
 
 Troncature des poids a des percentiles configurables pour limiter
 l'inflation de variance (Cole & Hernan, 2008).
@@ -46,13 +47,19 @@ import numpy as np
 import polars as pl
 from loguru import logger
 from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import Pipeline as SKPipeline
 from sklearn.preprocessing import OneHotEncoder
 
 from cnps.config import PipelineConfig, load_config
-from cnps.storage import object_exists, read_parquet, write_parquet, write_pickle
+from cnps.response_diagnostics import (
+    evaluate_oof_predictions,
+    grouped_oof_predictions,
+    inverse_propensity_weights,
+    reject_never_responding_strata,
+)
+from cnps.storage import object_exists, read_parquet, write_json, write_parquet
 
 # Covariables du modele de declaration (categorielles et numeriques)
 _CATEGORICAL_FEATURES = [
@@ -64,57 +71,50 @@ _CATEGORICAL_FEATURES = [
 _NUMERIC_FEATURES = [
     "LAG_D_JT",
     "TAUX_DECLARATION_PASSE",
+    "PREMIER_MOIS_RISQUE",
+    "FENETRE_RISQUE_EXTENSIBLE",
+    "JAMAIS_OBSERVE_AVANT_SECTEUR_ACTIVITE",
+    "JAMAIS_OBSERVE_AVANT_CLASSE_EFFECTIF_REDUITE",
 ]
 
 
 def _prepare_features(
     df: pl.DataFrame,
 ) -> tuple[pl.DataFrame, list[str], list[str]]:
-    """Selectionne et prepare les covariables du modele de declaration."""
-    cat_feats = [c for c in _CATEGORICAL_FEATURES if c in df.columns]
-    num_feats = [c for c in _NUMERIC_FEATURES if c in df.columns]
+    """Selectionne les lignes dans la portee K et prepare leurs covariables."""
+    if "DANS_UNIVERS_RISQUE" not in df.columns:
+        raise ValueError("DANS_UNIVERS_RISQUE absent: rejouer l'etape 05 apres le lot C.1.")
+    df_model = df.filter(pl.col("DANS_UNIVERS_RISQUE") == 1)
+    if df_model["D_JT"].null_count():
+        raise ValueError("D_JT est nul sur des lignes appartenant a la portee K.")
 
+    cat_feats = [c for c in _CATEGORICAL_FEATURES if c in df_model.columns]
+    num_feats = [c for c in _NUMERIC_FEATURES if c in df_model.columns]
     if not cat_feats and not num_feats:
         raise ValueError("Aucune covariable valide trouvee pour le modele de declaration")
 
-    df_model = df.drop_nulls(subset=["D_JT"])
-    if df_model.height != df.height:
-        logger.info("Lignes sans D_JT exclues de l'ajustement : {} -> {}", df.height, df_model.height)
-
-    # Indicateur d'absence d'historique. A la premiere periode du panel, les
-    # variables retardees sont nulles : il n'existe pas de mois anterieur.
-    # Les remplir a 0 sans le signaler ferait dire au modele "cette entreprise
-    # n'a pas declare le mois dernier", alors que l'information est absente et
-    # non negative. Le modele sous-estime alors leur propension a declarer et
-    # leur attribue des poids IPW gonflees. L'indicateur lui permet d'apprendre
-    # un intercept propre a ces lignes plutot que de les confondre avec des
-    # non-declarantes averees.
-    if num_feats:
-        manque_historique = pl.any_horizontal(
-            [pl.col(c).is_null() for c in num_feats]
-        ).cast(pl.Float64)
-        df_model = df_model.with_columns(manque_historique.alias("SANS_HISTORIQUE"))
-        n_sans = int(df_model.select(pl.col("SANS_HISTORIQUE").sum()).item())
-        if n_sans:
-            logger.info(
-                "Lignes sans historique (premiere periode du panel) : {} ({:.2f}%) "
-                "-- signalees au modele par SANS_HISTORIQUE plutot que confondues "
-                "avec des non-declarantes",
-                n_sans, n_sans / df_model.height * 100,
-            )
-            num_feats = [*num_feats, "SANS_HISTORIQUE"]
-
-    # Nulls numeriques -> 0, desormais accompagnes de l'indicateur ci-dessus
-    for col in num_feats:
-        df_model = df_model.with_columns(pl.col(col).fill_null(0.0))
-
-    # Nulls categoriels -> "INCONNU"
-    for col in cat_feats:
+    history_features = [
+        name for name in ("LAG_D_JT", "TAUX_DECLARATION_PASSE") if name in df_model.columns
+    ]
+    if history_features:
         df_model = df_model.with_columns(
-            pl.col(col).cast(pl.Utf8).fill_null("INCONNU")
+            pl.any_horizontal([pl.col(name).is_null() for name in history_features])
+            .cast(pl.Float64)
+            .alias("SANS_HISTORIQUE")
         )
+        num_feats = [*num_feats, "SANS_HISTORIQUE"]
 
-    logger.info("Covariables du modele de declaration : cat={}, num={}", cat_feats, num_feats)
+    df_model = df_model.with_columns(
+        [pl.col(name).cast(pl.Float64).fill_null(0.0) for name in num_feats]
+        + [pl.col(name).cast(pl.Utf8) for name in cat_feats]
+    )
+    logger.info(
+        "Portee K modelisee : {} lignes sur {}. Covariables cat={}, num={}.",
+        df_model.height,
+        df.height,
+        cat_feats,
+        num_feats,
+    )
     return df_model, cat_feats, num_feats
 
 
@@ -128,9 +128,9 @@ def ajuster_modele_declaration(cfg: PipelineConfig) -> str:
     2. Preparation des covariables (encodage one-hot des categorielles)
     3. Ajustement d'une regression logistique (regularisation L2)
     4. Prediction des scores de propension
-    5. Calcul des poids IPW stabilises et tronques
-    6. Evaluation du modele (AUC)
-    7. Sauvegarde du modele et mise a jour de la base entreprises avec les poids
+    5. Calcul du facteur IPW non stabilise
+    6. Diagnostics hors echantillon groupes par employeur
+    7. Sauvegarde d'un resume JSON et mise a jour de la base entreprises
 
     Parameters
     ----------
@@ -148,96 +148,152 @@ def ajuster_modele_declaration(cfg: PipelineConfig) -> str:
         raise FileNotFoundError(f"Base entreprises introuvable : {cleaned_bucket}/{firm_object}")
 
     df = read_parquet(cfg.minio, cleaned_bucket, firm_object)
-    logger.info("Ajustement du modele de declaration sur {} enregistrements entreprise-periode",
-                df.height)
+    logger.info(
+        "Ajustement du modele de declaration sur {} enregistrements entreprise-periode", df.height
+    )
 
     # --- Preparation des covariables ---
     df_model, cat_feats, num_feats = _prepare_features(df)
 
     y = df_model["D_JT"].to_numpy().astype(float)
 
-    # --- Pipeline sklearn ---
+    reject_never_responding_strata(
+        df_model,
+        target="D_JT",
+        categorical_features=cat_feats,
+        min_size=cfg.modeling.min_structural_stratum_size,
+        label="modele entreprise",
+    )
+
     transformers = []
     if cat_feats:
-        transformers.append((
-            "cat", OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"),
-            cat_feats,
-        ))
+        categorical_pipeline = SKPipeline(
+            [
+                ("imputer", SimpleImputer(strategy="most_frequent")),
+                (
+                    "encoder",
+                    OneHotEncoder(
+                        drop="first",
+                        sparse_output=False,
+                        handle_unknown="ignore",
+                    ),
+                ),
+            ]
+        )
+        transformers.append(("cat", categorical_pipeline, cat_feats))
     if num_feats:
         transformers.append(("num", "passthrough", num_feats))
 
-    preprocessor = ColumnTransformer(transformers, remainder="drop")
+    model = SKPipeline(
+        [
+            ("preprocessor", ColumnTransformer(transformers, remainder="drop")),
+            (
+                "classifier",
+                LogisticRegression(
+                    penalty="l2",
+                    C=1.0,
+                    max_iter=1000,
+                    solver="lbfgs",
+                    random_state=cfg.modeling.random_seed,
+                ),
+            ),
+        ]
+    )
 
-    model = SKPipeline([
-        ("preprocessor", preprocessor),
-        ("classifier", LogisticRegression(
-            penalty="l2",
-            C=1.0,
-            max_iter=1000,
-            solver="lbfgs",
-            random_state=cfg.modeling.random_seed,
-        )),
-    ])
+    X_df = df_model.select(cat_feats + num_feats).to_pandas().replace({None: np.nan})
+    if "ID_EMPLOYEUR" not in df_model.columns:
+        raise ValueError("ID_EMPLOYEUR absent: validation croisee groupee impossible.")
+    groups = df_model["ID_EMPLOYEUR"].to_numpy()
+    p_oof, n_splits = grouped_oof_predictions(
+        model,
+        X_df,
+        y,
+        groups,
+        n_splits=cfg.modeling.n_cv_splits,
+        random_seed=cfg.modeling.random_seed,
+    )
+    diagnostics = evaluate_oof_predictions(
+        X_df,
+        y,
+        p_oof,
+        clip=cfg.modeling.propensity_clip,
+        calibration_slope_range=cfg.modeling.calibration_slope_range,
+        max_calibration_in_large=cfg.modeling.max_calibration_in_large,
+        max_abs_smd=cfg.modeling.max_abs_smd,
+        n_splits=n_splits,
+        label="Modele entreprise",
+    )
+    if diagnostics.auc < cfg.modeling.min_auc:
+        logger.warning(
+            "AUC OOF {:.4f} sous le repere descriptif {:.4f}; aucun blocage AUC.",
+            diagnostics.auc,
+            cfg.modeling.min_auc,
+        )
 
-    X_df = df_model.select(cat_feats + num_feats).to_pandas()
     model.fit(X_df, y)
-
-    # --- Scores de propension ---
     p_hat = model.predict_proba(X_df)[:, 1]
-
-    auc = roc_auc_score(y, p_hat)
-    logger.info("AUC du modele de declaration : {:.4f}", auc)
-    if auc < cfg.modeling.min_auc:
-        logger.warning("AUC ({:.4f}) sous le seuil ({:.4f})", auc, cfg.modeling.min_auc)
-
-    # --- Poids IPW ---
-    # Poids stabilises : w_jt = P(D=1) / p_hat_jt
-    marginal_p = y.mean()
-    logger.info("Taux de declaration marginal (base de stabilisation) : {:.3f}", marginal_p)
-    epsilon = 1e-6
-    p_hat_clipped = np.clip(p_hat, epsilon, 1 - epsilon)
-    w_jt = marginal_p / p_hat_clipped
-
-    lo = np.quantile(w_jt, cfg.modeling.ipw_trim_lower)
-    hi = np.quantile(w_jt, cfg.modeling.ipw_trim_upper)
-    logger.info("Troncature des poids IPW aux percentiles [{:.0%}, {:.0%}] : bornes [{:.3f}, {:.3f}]",
-                cfg.modeling.ipw_trim_lower, cfg.modeling.ipw_trim_upper, lo, hi)
-    w_jt = np.clip(w_jt, lo, hi)
-
-    logger.info("Poids IPW : moyenne={:.3f}, mediane={:.3f}, plage=[{:.3f}, {:.3f}]",
-                w_jt.mean(), np.median(w_jt), w_jt.min(), w_jt.max())
-
-    # --- Mise a jour de la base entreprises ---
+    w_jt, _ = inverse_propensity_weights(
+        p_hat,
+        clip=cfg.modeling.propensity_clip,
+        max_clipped_share=cfg.modeling.max_clipped_share,
+        label="Poids entreprise",
+    )
     df_model = df_model.with_columns(
         pl.Series("W_JT", w_jt),
         pl.Series("P_HAT_JT", p_hat),
     )
 
-    # Reintegration dans la base complete (jointure pour preserver les lignes non modelisees)
-    if "ID_EMPLOYEUR" in df_model.columns and "PERIOD" in df_model.columns:
-        join_cols = ["ID_EMPLOYEUR", "PERIOD"]
-        weights_df = df_model.select(join_cols + ["W_JT", "P_HAT_JT"])
-        df_orig = read_parquet(cfg.minio, cleaned_bucket, firm_object).drop(["W_JT"], strict=False)
-        df_updated = df_orig.join(weights_df, on=join_cols, how="left")
-        n_fallback = df_updated["W_JT"].null_count()
-        df_updated = df_updated.with_columns(
-            pl.col("W_JT").fill_null(1.0),
-        )
-        if n_fallback > 0:
-            logger.info("Poids par defaut (1.0) applique a {} lignes non modelisees", n_fallback)
-    else:
-        df_updated = df_model
+    join_cols = ["ID_EMPLOYEUR", "PERIOD"]
+    weights_df = df_model.select(join_cols + ["W_JT", "P_HAT_JT"])
+    if weights_df.n_unique(subset=join_cols) != weights_df.height:
+        raise ValueError("Cle entreprise-periode du modele non unique.")
+    df_updated = df.drop(["W_JT", "P_HAT_JT"], strict=False).join(
+        weights_df,
+        on=join_cols,
+        how="left",
+    )
+    missing_in_scope = df_updated.filter(
+        (pl.col("DANS_UNIVERS_RISQUE") == 1)
+        & (pl.col("P_HAT_JT").is_null() | pl.col("W_JT").is_null())
+    ).height
+    if missing_in_scope:
+        raise ValueError(f"{missing_in_scope} lignes dans la portee K n'ont pas recu de poids.")
+    outside_scope = df_updated.filter(pl.col("DANS_UNIVERS_RISQUE") == 0).height
+    logger.info(
+        "{} lignes hors portee K conservent explicitement P_HAT_JT et W_JT a null; "
+        "aucun poids par defaut ne leur est attribue.",
+        outside_scope,
+    )
 
     write_parquet(cfg.minio, cleaned_bucket, firm_object, df_updated)
-    logger.info("Base entreprises mise a jour (poids IPW) : {} lignes, {} colonnes -> {}",
-                df_updated.height, df_updated.width, firm_object)
+    logger.info(
+        "Base entreprises mise a jour (poids IPW) : {} lignes, {} colonnes -> {}",
+        df_updated.height,
+        df_updated.width,
+        firm_object,
+    )
 
-    # --- Sauvegarde du modele ---
-    model_object = f"{cfg.minio.models_prefix}declaration_model.pkl"
-    write_pickle(cfg.minio, cfg.minio.models_bucket, model_object, {
-        "model": model, "auc": auc, "features": cat_feats + num_feats,
-    })
-    logger.info("Modele de declaration sauvegarde : {}", model_object)
+    # Seul un resume JSON non executable est persiste. Les pickles distants ne
+    # sont jamais necessaires a la validation et constitueraient un vecteur
+    # d'execution de code arbitraire.
+    model_object = f"{cfg.minio.models_prefix}declaration_model.json"
+    classifier = model.named_steps["classifier"]
+    preprocessor = model.named_steps["preprocessor"]
+    write_json(
+        cfg.minio,
+        cfg.minio.models_bucket,
+        model_object,
+        {
+            "schema_version": 1,
+            "model_type": "logistic_regression_l2",
+            "diagnostics_oof": diagnostics.__dict__,
+            "features_raw": cat_feats + num_feats,
+            "features_encoded": preprocessor.get_feature_names_out().tolist(),
+            "coefficients": classifier.coef_.tolist(),
+            "intercept": classifier.intercept_.tolist(),
+        },
+    )
+    logger.info("Resume JSON du modele de declaration sauvegarde : {}", model_object)
 
     return firm_object
 
@@ -266,7 +322,10 @@ if __name__ == "__main__":
     )
     logger.add(
         str(cfg.paths.logs / f"{Path(__file__).stem}.log"),
-        level="DEBUG", rotation="10 MB", retention="30 days", encoding="utf-8",
+        level="DEBUG",
+        rotation="10 MB",
+        retention="30 days",
+        encoding="utf-8",
     )
 
     try:

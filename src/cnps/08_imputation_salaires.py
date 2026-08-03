@@ -1,11 +1,16 @@
 """
-Etape 8/12 — Imputation multiple des salaires manquants.
+Module experimental hors DAG — Imputation multiple des salaires manquants.
+
+Ce module n'est pas une etape du chemin de publication. Ses sorties ne sont
+ni jointes aux estimateurs de l'etape 10, ni utilisees pour construire des
+intervalles. Il est conserve comme prototype de recherche jusqu'a validation
+methodologique separee.
 
 Lorsqu'une entreprise ne declare pas sur une periode donnee (D_jt = 0),
 sa distribution de salaires est inobservee. On impute le salaire moyen
 manquant via un modele log-lineaire estime sur les entreprises
-declarantes, puis on genere M jeux de donnees imputes par bootstrap
-des residus pour preserver l'incertitude d'imputation.
+declarantes, puis on genere M jeux de donnees avec un bruit gaussien
+parametrique sur l'echelle logarithmique.
 
 Methode
 -------
@@ -15,10 +20,11 @@ Methode
    avec e^(m) ~ N(0, sigma_hat^2)  (bootstrap des residus)
 3. Repetition M fois pour produire M jeux de donnees imputes
 
-Cette approche suit le cadre de Rubin (1987) pour l'imputation multiple
-par equations chainees (MICE), adapte au cas specifique de la
-non-reponse au niveau entreprise dans les donnees administratives de
-salaires.
+Ce prototype n'est pas une implementation MICE et ne constitue pas une
+imputation multiple propre pour l'inference : les parametres de regression
+restent fixes entre les jeux imputes. Il ne doit donc pas etre combine avec
+les regles de Rubin sans ajout de tirages de parametres et validation
+methodologique separee.
 
 References
 ----------
@@ -42,7 +48,7 @@ from sklearn.pipeline import Pipeline as SKPipeline
 from sklearn.preprocessing import OneHotEncoder
 
 from cnps.config import PipelineConfig, load_config
-from cnps.storage import object_exists, read_parquet, write_parquet, write_pickle
+from cnps.storage import object_exists, read_parquet, write_json, write_parquet
 
 _CATEGORICAL_FEATURES = [
     "SECTEUR_ACTIVITE",
@@ -91,8 +97,11 @@ def _prepare_imputation_data(
     )
     df_missing = df.filter(pl.col("D_JT") == 0)
 
-    logger.info("Imputation : {} entreprises declarantes, {} non-declarantes",
-                df_declaring.height, df_missing.height)
+    logger.info(
+        "Imputation : {} entreprises declarantes, {} non-declarantes",
+        df_declaring.height,
+        df_missing.height,
+    )
 
     return df_declaring, df_missing, cat_feats, num_feats
 
@@ -134,31 +143,50 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
     # --- Ajustement OLS sur log(salaire) ---
     features = cat_feats + num_feats
     logger.info("Covariables du modele d'imputation : {}", features)
+    if not features:
+        raise ValueError("Aucune covariable disponible pour le prototype d'imputation.")
     y_train = df_declaring["LOG_SALAIRE_MOYEN"].to_numpy()
 
     transformers = []
     if cat_feats:
-        transformers.append((
-            "cat", OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"),
-            cat_feats,
-        ))
+        transformers.append(
+            (
+                "cat",
+                OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"),
+                cat_feats,
+            )
+        )
     if num_feats:
         transformers.append(("num", "passthrough", num_feats))
 
     preprocessor = ColumnTransformer(transformers, remainder="drop")
-    model = SKPipeline([
-        ("preprocessor", preprocessor),
-        ("regressor", LinearRegression()),
-    ])
+    model = SKPipeline(
+        [
+            ("preprocessor", preprocessor),
+            ("regressor", LinearRegression()),
+        ]
+    )
 
     X_train = df_declaring.select(features).to_pandas()
     model.fit(X_train, y_train)
 
-    # Ecart-type des residus
+    # Ecart-type residuel avec degres de liberte du modele effectivement
+    # encode, et non simple nombre de variables brutes.
     y_pred_train = model.predict(X_train)
     residuals = y_train - y_pred_train
-    sigma_hat = float(np.std(residuals, ddof=len(features)))
-    r_squared = 1 - np.var(residuals) / np.var(y_train)
+    regressor = model.named_steps["regressor"]
+    residual_df = int(len(y_train) - regressor.rank_ - 1)
+    if residual_df <= 0:
+        raise ValueError(
+            "Echantillon declarant insuffisant pour estimer la variance "
+            "residuelle du prototype d'imputation."
+        )
+    residual_sum_squares = float(np.sum(residuals**2))
+    total_sum_squares = float(np.sum((y_train - np.mean(y_train)) ** 2))
+    if total_sum_squares <= 0:
+        raise ValueError("SALAIRE_MOYEN est constant chez les declarantes; R2 non defini.")
+    sigma_hat = float(np.sqrt(residual_sum_squares / residual_df))
+    r_squared = 1 - residual_sum_squares / total_sum_squares
     logger.info("Modele d'imputation : R2={:.4f}, sigma={:.4f}", r_squared, sigma_hat)
 
     # --- Generation des M imputations ---
@@ -171,15 +199,15 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
     # entreprises recoivent l'imputation la moins informee du lot.
     for col in cat_feats:
         connues = set(df_declaring[col].drop_nulls().unique().to_list())
-        inconnues = df_missing.filter(
-            pl.col(col).is_not_null() & ~pl.col(col).is_in(list(connues))
-        )
+        inconnues = df_missing.filter(pl.col(col).is_not_null() & ~pl.col(col).is_in(list(connues)))
         if inconnues.height:
             logger.warning(
                 "Imputation : {} couples entreprise-mois ({:.2f}%) ont une modalite "
                 "de '{}' absente des entreprises declarantes -- leur imputation "
                 "repose sur le seul intercept du modele",
-                inconnues.height, inconnues.height / df_missing.height * 100, col,
+                inconnues.height,
+                inconnues.height / df_missing.height * 100,
+                col,
             )
 
     y_hat = model.predict(X_missing)
@@ -221,13 +249,36 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
     # Combine : pour chaque imputation m, jeu complet = declarantes + imputees(m)
     all_frames = []
     for m in range(M):
-        full_m = pl.concat([
-            df_declaring.with_columns(pl.lit(m + 1).cast(pl.Int32).alias("IMPUTATION_ID")),
-            imputed_frames[m],
-        ], how="diagonal")
+        full_m = pl.concat(
+            [
+                df_declaring.with_columns(pl.lit(m + 1).cast(pl.Int32).alias("IMPUTATION_ID")),
+                imputed_frames[m],
+            ],
+            how="diagonal",
+        )
         all_frames.append(full_m)
 
     result = pl.concat(all_frames, how="diagonal")
+
+    expected_rows = M * (df_declaring.height + df_missing.height)
+    if result.height != expected_rows:
+        raise AssertionError(
+            "Invariant de cardinalite de l'imputation viole : "
+            f"{result.height} lignes produites, {expected_rows} attendues "
+            f"pour M={M}."
+        )
+
+    counts_by_imputation = result.group_by("IMPUTATION_ID").len()
+    expected_per_imputation = df_declaring.height + df_missing.height
+    if (
+        counts_by_imputation.height != M
+        or counts_by_imputation["len"].n_unique() != 1
+        or counts_by_imputation["len"][0] != expected_per_imputation
+    ):
+        raise AssertionError(
+            "Chaque imputation doit contenir exactement une copie de toutes "
+            "les lignes entreprise-mois."
+        )
 
     if n_bornees:
         total_imputes = len(y_hat) * M
@@ -235,7 +286,10 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
             "Imputations ramenees dans la plage observee [{:.0f}, {:.0f}] : {} sur {} "
             "({:.2f}%) -- l'exponentielle du bruit gaussien produit sinon des valeurs "
             "sans rapport avec les salaires constates",
-            borne_basse, borne_haute, n_bornees, total_imputes,
+            borne_basse,
+            borne_haute,
+            n_bornees,
+            total_imputes,
             n_bornees / total_imputes * 100,
         )
 
@@ -243,21 +297,43 @@ def imputer_salaires(cfg: PipelineConfig) -> str:
     logger.info(
         "Salaires imputes (toutes imputations confondues) : moyenne={:.0f}, mediane={:.0f}, "
         "plage=[{:.0f}, {:.0f}] (observe : moyenne={:.0f}, mediane={:.0f})",
-        imputed_all.mean(), float(np.median(imputed_all)), imputed_all.min(), imputed_all.max(),
-        df_declaring["SALAIRE_MOYEN"].mean(), df_declaring["SALAIRE_MOYEN"].median(),
+        imputed_all.mean(),
+        float(np.median(imputed_all)),
+        imputed_all.min(),
+        imputed_all.max(),
+        df_declaring["SALAIRE_MOYEN"].mean(),
+        df_declaring["SALAIRE_MOYEN"].median(),
     )
 
     out_object = f"{cfg.minio.cleaned_prefix}firm_base_imputed.parquet"
     write_parquet(cfg.minio, cleaned_bucket, out_object, result)
-    logger.info("Base entreprises imputee : {} lignes, {} colonnes (M={}) -> {}",
-                result.height, result.width, M, out_object)
+    logger.info(
+        "Base entreprises imputee : {} lignes, {} colonnes (M={}) -> {}",
+        result.height,
+        result.width,
+        M,
+        out_object,
+    )
 
-    model_object = f"{cfg.minio.models_prefix}imputation_model.pkl"
-    write_pickle(cfg.minio, cfg.minio.models_bucket, model_object, {
-        "model": model, "sigma": sigma_hat, "r_squared": r_squared,
-        "features": features,
-    })
-    logger.info("Modele d'imputation sauvegarde : {}", model_object)
+    model_object = f"{cfg.minio.models_prefix}imputation_model.json"
+    fitted_preprocessor = model.named_steps["preprocessor"]
+    write_json(
+        cfg.minio,
+        cfg.minio.models_bucket,
+        model_object,
+        {
+            "schema_version": 1,
+            "publication_status": "EXPERIMENTAL_HORS_DAG",
+            "model_type": "linear_regression_log_salary",
+            "sigma": sigma_hat,
+            "r_squared": r_squared,
+            "features_raw": features,
+            "features_encoded": fitted_preprocessor.get_feature_names_out().tolist(),
+            "coefficients": regressor.coef_.tolist(),
+            "intercept": float(regressor.intercept_),
+        },
+    )
+    logger.info("Resume JSON du modele d'imputation sauvegarde : {}", model_object)
 
     return out_object
 
@@ -286,7 +362,10 @@ if __name__ == "__main__":
     )
     logger.add(
         str(cfg.paths.logs / f"{Path(__file__).stem}.log"),
-        level="DEBUG", rotation="10 MB", retention="30 days", encoding="utf-8",
+        level="DEBUG",
+        rotation="10 MB",
+        retention="30 days",
+        encoding="utf-8",
     )
 
     try:

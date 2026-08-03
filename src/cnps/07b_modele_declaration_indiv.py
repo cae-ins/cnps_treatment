@@ -31,9 +31,9 @@ Domaine d'estimation
 Le modele est ajuste **uniquement sur les salaries des entreprises
 declarantes** (``D_JT = 1``). Pour les autres, ``q_ijt`` n'est pas defini :
 il n'y a rien a observer a l'interieur d'une entreprise qui n'a rien
-transmis. Ces lignes gardent ``W_INDIV = 1.0`` et sont prises en charge par
-``W_JT`` (etape 07) et l'imputation au niveau entreprise (etape 08),
-exactement comme dans l'annexe 2.
+transmis. Ces lignes gardent la convention neutre ``W_INDIV = 1.0``. Le
+facteur de reponse ``R_ijt`` de l'etape 09 leur attribue un poids final nul;
+aucune imputation n'entre dans le chemin de publication.
 
 References
 ----------
@@ -49,13 +49,19 @@ import numpy as np
 import polars as pl
 from loguru import logger
 from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import Pipeline as SKPipeline
 from sklearn.preprocessing import OneHotEncoder
 
 from cnps.config import PipelineConfig, load_config
-from cnps.storage import object_exists, read_parquet, write_parquet, write_pickle
+from cnps.response_diagnostics import (
+    evaluate_oof_predictions,
+    grouped_oof_predictions,
+    inverse_propensity_weights,
+    reject_never_responding_strata,
+)
+from cnps.storage import object_exists, read_parquet, write_json, write_parquet
 
 # Caracteristiques propres au salarie (X_ijt de l'annexe 3)
 _CATEGORICAL_FEATURES = [
@@ -86,6 +92,8 @@ _NUMERIC_FEATURES = [
     # "jamais declare" (historique connu et negatif) : sans elle, les deux
     # situations presentent les memes valeurs nulles remplies a zero.
     "SANS_HISTORIQUE_INDIV",
+    "HISTORIQUE_MOIS_PRECEDENT_MANQUANT",
+    "PREMIER_MOIS_RISQUE",
 ]
 
 
@@ -98,23 +106,41 @@ def _ajouter_historique_individuel(df: pl.DataFrame) -> pl.DataFrame:
       (moyenne cumulee **excluant le mois courant**, pour ne pas injecter dans
       les covariables l'information que le modele doit predire).
     """
-    if "ID_INDIV" not in df.columns or "S_IJT" not in df.columns:
-        logger.warning(
-            "ID_INDIV ou S_IJT absent : historique individuel non calcule."
-        )
+    if not {"ID_INDIV", "ID_EMPLOYEUR", "S_IJT"} <= set(df.columns):
+        logger.warning("ID_INDIV, ID_EMPLOYEUR ou S_IJT absent : historique non calcule.")
         return df
 
-    sort_cols = [c for c in ("ID_INDIV", "PERIOD", "ANNEE", "MOIS") if c in df.columns]
-    if len(sort_cols) < 2:
-        logger.warning("Aucune colonne de periode : historique individuel non calcule.")
-        return df
+    history_keys = ["ID_INDIV", "ID_EMPLOYEUR"]
+    period_index = "PERIOD_INDEX"
+    temporary_period_index = False
+    if period_index not in df.columns:
+        if {"ANNEE", "MOIS"} <= set(df.columns):
+            df = df.with_columns(
+                (pl.col("ANNEE") * 12 + pl.col("MOIS") - 1)
+                .cast(pl.Int32)
+                .alias("_HIST_PERIOD_INDEX")
+            )
+            period_index = "_HIST_PERIOD_INDEX"
+            temporary_period_index = True
+        else:
+            logger.warning("Index mensuel absent : historique individuel non calcule.")
+            return df
+
+    sort_cols = [*history_keys, period_index]
 
     df = df.sort(sort_cols)
     # Rang chronologique de l'observation dans la serie de l'individu (0 = 1re).
     # C'est le nombre de mois ANTERIEURS, donc le denominateur du taux passe.
-    n_anterieurs = pl.int_range(0, pl.len()).over("ID_INDIV")
+    n_anterieurs = pl.int_range(0, pl.len()).over(history_keys)
+    previous_response = pl.col("S_IJT").shift(1).over(history_keys)
+    previous_index = pl.col(period_index).shift(1).over(history_keys)
+    calendar_gap = pl.col(period_index) - previous_index
     df = df.with_columns(
-        pl.col("S_IJT").shift(1).over("ID_INDIV").fill_null(0).cast(pl.Int8)
+        pl.when(calendar_gap == 1)
+        .then(previous_response)
+        .otherwise(0)
+        .fill_null(0)
+        .cast(pl.Int8)
         .alias("S_IJT_LAG"),
         # cum_sum decale d'un rang / nombre de mois anterieurs : la moyenne
         # porte sur le passe strict, sans jamais inclure le mois courant (ce
@@ -123,7 +149,7 @@ def _ajouter_historique_individuel(df: pl.DataFrame) -> pl.DataFrame:
         # on pose 0.0 plutot que de diviser (sinon inf).
         pl.when(n_anterieurs > 0)
         .then(
-            pl.col("S_IJT").cum_sum().over("ID_INDIV").shift(1) / n_anterieurs
+            pl.col("S_IJT").cum_sum().over(history_keys).shift(1).over(history_keys) / n_anterieurs
         )
         .otherwise(0.0)
         .fill_null(0.0)
@@ -134,53 +160,92 @@ def _ajouter_historique_individuel(df: pl.DataFrame) -> pl.DataFrame:
         # sous-estimerait alors sa probabilite d'etre declare et lui
         # attribuerait un poids W_INDIV excessif.
         (n_anterieurs == 0).cast(pl.Float64).alias("SANS_HISTORIQUE_INDIV"),
+        ((n_anterieurs > 0) & (calendar_gap.is_null() | (calendar_gap != 1)))
+        .cast(pl.Float64)
+        .alias("HISTORIQUE_MOIS_PRECEDENT_MANQUANT"),
     )
     n_sans = int(df.select(pl.col("SANS_HISTORIQUE_INDIV").sum()).item())
     logger.info(
         "Historique individuel calcule : S_IJT_LAG, TAUX_DECLARATION_PASSE_INDIV, "
         "SANS_HISTORIQUE_INDIV ({} premieres observations, {:.2f}%)",
-        n_sans, n_sans / df.height * 100 if df.height else 0.0,
+        n_sans,
+        n_sans / df.height * 100 if df.height else 0.0,
     )
 
-    # --- Contexte organisationnel : completude habituelle de l'entreprise ---
-    # ATTENTION : le taux de completude du mois COURANT contient directement
-    # l'information a predire (si l'entreprise declare 100% de ses salaries,
-    # alors S_IJT = 1 par construction). On le decale donc d'un mois : c'est le
-    # comportement PASSE de l'employeur qui sert de covariable, jamais celui du
-    # mois estime.
-    if {"EFFECTIF_DECLARE", "EFFECTIF_OBSERVE", "ID_EMPLOYEUR"} <= set(df.columns):
-        df = df.sort([c for c in ("ID_EMPLOYEUR", "PERIOD", "ANNEE", "MOIS") if c in df.columns])
-        # Completude du mois : part des salaries presents dont le salaire est
-        # renseigne. Le panel de l'etape 05 etant equilibre, les mois ou
-        # l'entreprise n'apparait pas ont EFFECTIF_* a null : la completude y
-        # vaut 0 (rien de declare), et non "inconnue" -- d'ou le fill_null(0.0)
-        # AVANT le decalage. L'appliquer apres confondrait "mois precedent sans
-        # declaration" et "pas de mois precedent".
-        completude = (
-            pl.when(pl.col("EFFECTIF_OBSERVE").fill_null(0) > 0)
-            .then(
-                pl.col("EFFECTIF_DECLARE").fill_null(0).cast(pl.Float64)
-                / pl.col("EFFECTIF_OBSERVE").cast(pl.Float64)
+    if temporary_period_index:
+        df = df.drop("_HIST_PERIOD_INDEX")
+    return df
+
+
+def _ajouter_contexte_entreprise(
+    df: pl.DataFrame,
+    firm_base: pl.DataFrame,
+) -> pl.DataFrame:
+    """Joint la completude du mois civil precedent calculee sur firm_base."""
+    keys = ["ID_EMPLOYEUR", "PERIOD"]
+    required = {
+        *keys,
+        "EFFECTIF_DECLARE",
+        "EFFECTIF_OBSERVE",
+        "PREMIER_MOIS_RISQUE",
+    }
+    missing = sorted(required - set(firm_base.columns))
+    if missing:
+        raise ValueError("Contexte entreprise incomplet dans firm_base: " + ", ".join(missing))
+    if firm_base.n_unique(subset=keys) != firm_base.height:
+        raise ValueError("Cle (ID_EMPLOYEUR, PERIOD) non unique dans firm_base.")
+
+    sort_cols = ["ID_EMPLOYEUR", "PERIOD"]
+    if "PERIOD_INDEX" in firm_base.columns:
+        sort_cols = ["ID_EMPLOYEUR", "PERIOD_INDEX"]
+    firm = firm_base.sort(sort_cols)
+
+    if "PERIOD_INDEX" in firm.columns:
+        gap = pl.col("PERIOD_INDEX") - pl.col("PERIOD_INDEX").shift(1).over("ID_EMPLOYEUR")
+        n_gaps = firm.filter(gap.is_not_null() & (gap != 1)).height
+        if n_gaps:
+            raise ValueError(
+                f"firm_base contient {n_gaps} ruptures de mois civil; "
+                "rejouer l'etape 05 avant le modele individuel."
             )
-            .otherwise(0.0)
+
+    completion = (
+        pl.when(pl.col("EFFECTIF_OBSERVE").fill_null(0) > 0)
+        .then(
+            pl.col("EFFECTIF_DECLARE").fill_null(0).cast(pl.Float64)
+            / pl.col("EFFECTIF_OBSERVE").cast(pl.Float64)
         )
-        df = df.with_columns(
-            completude.shift(1)
+        .otherwise(0.0)
+    )
+    context = (
+        firm.with_columns(completion.alias("_COMPLETUDE_COURANTE"))
+        .with_columns(
+            pl.col("_COMPLETUDE_COURANTE")
+            .shift(1)
             .over("ID_EMPLOYEUR")
-            .fill_null(0.0)  # 1er mois observe : pas d'historique
             .alias("TAUX_COMPLETUDE_ENTREPRISE")
         )
-        logger.info(
-            "Contexte entreprise calcule : TAUX_COMPLETUDE_ENTREPRISE "
-            "(completude du mois precedent, decalee pour eviter toute fuite)"
+        .select(
+            *keys,
+            "TAUX_COMPLETUDE_ENTREPRISE",
+            "PREMIER_MOIS_RISQUE",
         )
-    else:
-        logger.info(
-            "EFFECTIF_DECLARE/EFFECTIF_OBSERVE absents : TAUX_COMPLETUDE_ENTREPRISE "
-            "non calcule (l'etape 05 doit avoir ete rejouee)."
-        )
+    )
 
-    return df
+    before = df.height
+    result = df.drop(
+        ["TAUX_COMPLETUDE_ENTREPRISE", "PREMIER_MOIS_RISQUE"],
+        strict=False,
+    ).join(context, on=keys, how="left")
+    if result.height != before:
+        raise ValueError("La jointure du contexte entreprise a change le nombre de lignes.")
+    if result["PREMIER_MOIS_RISQUE"].null_count():
+        raise ValueError("Des lignes analytiques n'ont pas de correspondance dans firm_base.")
+    logger.info(
+        "TAUX_COMPLETUDE_ENTREPRISE joint depuis firm_base: meme valeur pour "
+        "toutes les lignes d'un couple entreprise-mois, decalee d'un mois civil."
+    )
+    return result
 
 
 def _prepare_features(df: pl.DataFrame) -> tuple[pl.DataFrame, list[str], list[str]]:
@@ -193,17 +258,13 @@ def _prepare_features(df: pl.DataFrame) -> tuple[pl.DataFrame, list[str], list[s
     num_feats = [c for c in num_feats if df[c].n_unique() > 1]
 
     if not cat_feats and not num_feats:
-        raise ValueError(
-            "Aucune covariable valide pour le modele de declaration individuelle"
-        )
+        raise ValueError("Aucune covariable valide pour le modele de declaration individuelle")
 
     df_model = df.with_columns(
-        [pl.col(c).cast(pl.Utf8).fill_null("INCONNU") for c in cat_feats]
+        [pl.col(c).cast(pl.Utf8) for c in cat_feats]
         + [pl.col(c).cast(pl.Float64).fill_null(0.0) for c in num_feats]
     )
-    logger.info(
-        "Covariables du modele individuel : cat={}, num={}", cat_feats, num_feats
-    )
+    logger.info("Covariables du modele individuel : cat={}, num={}", cat_feats, num_feats)
     return df_model, cat_feats, num_feats
 
 
@@ -217,8 +278,8 @@ def ajuster_modele_declaration_indiv(cfg: PipelineConfig) -> str:
     2. Calcul de l'historique de declaration individuelle
     3. Restriction aux entreprises declarantes (D_JT = 1)
     4. Ajustement d'une regression logistique sur S_IJT
-    5. Poids stabilises W_INDIV = q_moyen / q_hat, tronques
-    6. W_INDIV = 1.0 pour les salaries des entreprises non declarantes
+    5. Facteur individuel non stabilise W_INDIV = 1 / q_hat
+    6. Convention neutre W_INDIV = 1.0 hors du domaine conditionnel
     7. Mise a jour de la base analytique
 
     Returns
@@ -229,77 +290,45 @@ def ajuster_modele_declaration_indiv(cfg: PipelineConfig) -> str:
     bucket = cfg.minio.cleaned_bucket
     analytical_object = f"{cfg.minio.cleaned_prefix}analytical_base.parquet"
     if not object_exists(cfg.minio, bucket, analytical_object):
-        raise FileNotFoundError(
-            f"Base analytique introuvable : {bucket}/{analytical_object}"
-        )
+        raise FileNotFoundError(f"Base analytique introuvable : {bucket}/{analytical_object}")
 
     df = read_parquet(cfg.minio, bucket, analytical_object)
     logger.info("Modele de declaration individuelle sur {} lignes", df.height)
 
-    # --- Rafraichissement des poids entreprise ---
-    # La base analytique est construite a l'etape 06, AVANT que l'etape 07
-    # n'ajuste le modele entreprise : elle porte donc un W_JT provisoire (1.0)
-    # et pas de P_HAT_JT. On les recupere depuis firm_base, mise a jour par
-    # l'etape 07, faute de quoi le W_FINAL calcule plus bas serait faux et
-    # l'etape 09 travaillerait sur des poids perimes.
+    # D.1: le contexte entreprise vient du panel complet de l'etape 05.
+    # Les poids entreprise ne sont volontairement pas joints ici; E.1 les
+    # rapatrie dans l'etape 09, seule etape qui les consomme.
     firm_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
-    if object_exists(cfg.minio, bucket, firm_object):
-        firm = read_parquet(cfg.minio, bucket, firm_object)
-        poids_cols = [c for c in ("W_JT", "P_HAT_JT") if c in firm.columns]
-        join_cols = [
-            c for c in ("ID_EMPLOYEUR", "PERIOD")
-            if c in df.columns and c in firm.columns
-        ]
-        if poids_cols and len(join_cols) == 2:
-            df = df.drop(poids_cols, strict=False).join(
-                firm.select(join_cols + poids_cols), on=join_cols, how="left"
-            )
-            n_sans_poids = df["W_JT"].null_count() if "W_JT" in df.columns else 0
-            if n_sans_poids:
-                df = df.with_columns(pl.col("W_JT").fill_null(1.0))
-                logger.info(
-                    "Poids entreprise par defaut (1.0) applique a {} lignes sans "
-                    "correspondance dans firm_base", n_sans_poids,
-                )
-            logger.info("Poids entreprise rafraichis depuis firm_base : {}", poids_cols)
-        else:
-            logger.warning(
-                "Impossible de rafraichir les poids entreprise (colonnes {} / cles {}) : "
-                "W_JT peut etre perime.", poids_cols, join_cols,
-            )
-    else:
-        logger.warning(
-            "firm_base introuvable : W_JT reste celui de l'etape 06 (provisoire)."
-        )
+    if not object_exists(cfg.minio, bucket, firm_object):
+        raise FileNotFoundError(f"Base entreprises introuvable : {bucket}/{firm_object}")
+    firm = read_parquet(cfg.minio, bucket, firm_object)
 
     if "S_IJT" not in df.columns:
-        raise ValueError(
-            "Colonne S_IJT absente : l'etape 04 doit la calculer avant cette etape."
-        )
+        raise ValueError("Colonne S_IJT absente : l'etape 04 doit la calculer avant cette etape.")
     if "D_JT" not in df.columns:
-        raise ValueError(
-            "Colonne D_JT absente : l'etape 05 doit la calculer avant cette etape."
-        )
+        raise ValueError("Colonne D_JT absente : l'etape 05 doit la calculer avant cette etape.")
 
     df = _ajouter_historique_individuel(df)
+    df = _ajouter_contexte_entreprise(df, firm)
 
     # --- Domaine d'estimation : entreprises declarantes uniquement ---
     # q_ijt est conditionnel a D_JT = 1. Estimer le modele sur l'ensemble des
     # lignes melangerait deux mecanismes distincts (l'entreprise ne declare
     # pas / elle declare mais omet ce salarie) et biaiserait les deux.
-    declarantes = df.filter(pl.col("D_JT") == 1)
+    scope = (
+        pl.col("DANS_UNIVERS_RISQUE") == 1 if "DANS_UNIVERS_RISQUE" in df.columns else pl.lit(True)
+    )
+    declarantes = df.filter(scope & (pl.col("D_JT") == 1))
     n_hors_domaine = df.height - declarantes.height
     logger.info(
         "Domaine d'estimation : {} lignes en entreprises declarantes, "
         "{} lignes hors domaine (D_JT = 0, W_INDIV restera a 1.0)",
-        declarantes.height, n_hors_domaine,
+        declarantes.height,
+        n_hors_domaine,
     )
 
     if declarantes.height == 0:
-        logger.warning(
-            "Aucune entreprise declarante : W_INDIV laisse a 1.0 sur toutes les lignes."
-        )
-        return analytical_object
+        raise ValueError("Aucune entreprise declarante pour ajuster q_ijt.")
 
     taux_declare = float(declarantes["S_IJT"].mean())
     logger.info(
@@ -307,119 +336,155 @@ def ajuster_modele_declaration_indiv(cfg: PipelineConfig) -> str:
         taux_declare * 100,
     )
 
-    # Si toutes les entreprises declarantes declarent 100% de leurs salaries,
-    # il n'y a pas de non-reponse partielle a corriger : le modele n'a pas
-    # d'objet et le second etage se reduit a l'identite.
     if declarantes["S_IJT"].n_unique() < 2:
-        logger.warning(
-            "S_IJT est constant chez les entreprises declarantes : aucune "
-            "declaration partielle a corriger, W_INDIV reste a 1.0."
-        )
-        df = df.with_columns(pl.lit(1.0).alias("W_INDIV"))
-        write_parquet(cfg.minio, bucket, analytical_object, df)
-        return analytical_object
+        raise ValueError("Classe cible unique pour S_IJT chez les entreprises declarantes.")
 
     df_model, cat_feats, num_feats = _prepare_features(declarantes)
     y = df_model["S_IJT"].to_numpy().astype(float)
 
+    reject_never_responding_strata(
+        df_model,
+        target="S_IJT",
+        categorical_features=cat_feats,
+        min_size=cfg.modeling.min_structural_stratum_size,
+        label="modele individuel",
+    )
+
     transformers = []
     if cat_feats:
-        transformers.append((
-            "cat",
-            OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"),
-            cat_feats,
-        ))
+        categorical_pipeline = SKPipeline(
+            [
+                ("imputer", SimpleImputer(strategy="most_frequent")),
+                (
+                    "encoder",
+                    OneHotEncoder(
+                        drop="first",
+                        sparse_output=False,
+                        handle_unknown="ignore",
+                    ),
+                ),
+            ]
+        )
+        transformers.append(("cat", categorical_pipeline, cat_feats))
     if num_feats:
         transformers.append(("num", "passthrough", num_feats))
 
-    model = SKPipeline([
-        ("preprocessor", ColumnTransformer(transformers, remainder="drop")),
-        ("classifier", LogisticRegression(
-            penalty="l2",
-            C=1.0,
-            max_iter=1000,
-            solver="lbfgs",
-            random_state=cfg.modeling.random_seed,
-        )),
-    ])
+    model = SKPipeline(
+        [
+            ("preprocessor", ColumnTransformer(transformers, remainder="drop")),
+            (
+                "classifier",
+                LogisticRegression(
+                    penalty="l2",
+                    C=1.0,
+                    max_iter=1000,
+                    solver="lbfgs",
+                    random_state=cfg.modeling.random_seed,
+                ),
+            ),
+        ]
+    )
 
-    X_df = df_model.select(cat_feats + num_feats).to_pandas()
-    model.fit(X_df, y)
-
-    q_hat = model.predict_proba(X_df)[:, 1]
-
-    auc = roc_auc_score(y, q_hat)
-    logger.info("AUC du modele de declaration individuelle : {:.4f}", auc)
-    if auc < cfg.modeling.min_auc:
+    X_df = df_model.select(cat_feats + num_feats).to_pandas().replace({None: np.nan})
+    groups = df_model["ID_EMPLOYEUR"].to_numpy()
+    q_oof, n_splits = grouped_oof_predictions(
+        model,
+        X_df,
+        y,
+        groups,
+        n_splits=cfg.modeling.n_cv_splits,
+        random_seed=cfg.modeling.random_seed,
+    )
+    diagnostics = evaluate_oof_predictions(
+        X_df,
+        y,
+        q_oof,
+        clip=cfg.modeling.propensity_clip,
+        calibration_slope_range=cfg.modeling.calibration_slope_range,
+        max_calibration_in_large=cfg.modeling.max_calibration_in_large,
+        max_abs_smd=cfg.modeling.max_abs_smd,
+        n_splits=n_splits,
+        label="Modele individuel",
+    )
+    if diagnostics.auc < cfg.modeling.min_auc:
         logger.warning(
-            "AUC ({:.4f}) sous le seuil configure ({:.4f}) : les poids W_INDIV "
-            "corrigeront mal la non-reponse partielle. Enrichir les covariables.",
-            auc, cfg.modeling.min_auc,
+            "AUC OOF individuelle {:.4f} sous le repere descriptif {:.4f}; aucun blocage AUC.",
+            diagnostics.auc,
+            cfg.modeling.min_auc,
         )
 
-    # --- Poids stabilises et tronques (meme schema que l'etape 07) ---
-    epsilon = 1e-6
-    q_hat_clipped = np.clip(q_hat, epsilon, 1 - epsilon)
-    w_indiv = taux_declare / q_hat_clipped
-
-    lo = float(np.quantile(w_indiv, cfg.modeling.ipw_trim_lower))
-    hi = float(np.quantile(w_indiv, cfg.modeling.ipw_trim_upper))
-    logger.info(
-        "Troncature des poids individuels aux percentiles [{:.0%}, {:.0%}] : "
-        "bornes [{:.3f}, {:.3f}]",
-        cfg.modeling.ipw_trim_lower, cfg.modeling.ipw_trim_upper, lo, hi,
-    )
-    w_indiv = np.clip(w_indiv, lo, hi)
-    logger.info(
-        "Poids W_INDIV (entreprises declarantes) : moyenne={:.3f}, mediane={:.3f}, "
-        "plage=[{:.3f}, {:.3f}]",
-        w_indiv.mean(), float(np.median(w_indiv)), w_indiv.min(), w_indiv.max(),
+    model.fit(X_df, y)
+    q_hat = model.predict_proba(X_df)[:, 1]
+    w_indiv, _ = inverse_propensity_weights(
+        q_hat,
+        clip=cfg.modeling.propensity_clip,
+        max_clipped_share=cfg.modeling.max_clipped_share,
+        label="Poids individuels",
     )
 
-    # --- Reintegration dans la base complete ---
     df_model = df_model.with_columns(
         pl.Series("_W_INDIV_NEW", w_indiv),
-        pl.Series("Q_HAT_IJT", q_hat),
+        pl.Series("_Q_HAT_NEW", q_hat),
     )
-
     join_key = "OBS_ID" if "OBS_ID" in df.columns and "OBS_ID" in df_model.columns else None
     if join_key is None:
-        raise ValueError(
-            "OBS_ID absent : impossible de reinjecter les poids individuels sans "
-            "cle d'observation unique (voir etape 04)."
-        )
+        raise ValueError("OBS_ID absent : impossible de reinjecter les poids individuels.")
+    if df_model[join_key].n_unique() != df_model.height:
+        raise ValueError("OBS_ID non unique dans le domaine du modele individuel.")
 
-    df = df.drop(["Q_HAT_IJT"], strict=False).join(
-        df_model.select([join_key, "_W_INDIV_NEW", "Q_HAT_IJT"]),
+    df = df.drop(["Q_HAT_IJT", "W_INDIV", "W_FINAL"], strict=False).join(
+        df_model.select([join_key, "_W_INDIV_NEW", "_Q_HAT_NEW"]),
         on=join_key,
         how="left",
     )
+    missing_declaring = df.filter(
+        scope
+        & (pl.col("D_JT") == 1)
+        & (pl.col("_W_INDIV_NEW").is_null() | pl.col("_Q_HAT_NEW").is_null())
+    ).height
+    if missing_declaring:
+        raise ValueError(f"{missing_declaring} lignes declarantes sans poids individuel.")
 
-    # Hors domaine (D_JT = 0) : W_INDIV = 1.0, la correction est portee par W_JT
-    # et l'imputation entreprise de l'etape 08.
+    # Hors domaine q_ijt n'est pas estime. La convention neutre q=1 est
+    # explicite; le facteur D_JT mettra ces lignes a zero a l'etape 09.
     df = df.with_columns(
-        pl.col("_W_INDIV_NEW").fill_null(1.0).alias("W_INDIV")
-    ).drop("_W_INDIV_NEW")
-
-    # W_FINAL provisoire, recalcule a l'etape 09 selon la methode retenue
-    if "W_JT" in df.columns:
-        df = df.with_columns((pl.col("W_JT") * pl.col("W_INDIV")).alias("W_FINAL"))
-        logger.info("W_FINAL provisoire recalcule : W_JT x W_INDIV")
+        pl.when(scope & (pl.col("D_JT") == 1))
+        .then(pl.col("_W_INDIV_NEW"))
+        .otherwise(1.0)
+        .alias("W_INDIV"),
+        pl.when(scope & (pl.col("D_JT") == 1))
+        .then(pl.col("_Q_HAT_NEW"))
+        .otherwise(1.0)
+        .alias("Q_HAT_IJT"),
+    ).drop(["_W_INDIV_NEW", "_Q_HAT_NEW"])
 
     write_parquet(cfg.minio, bucket, analytical_object, df)
     logger.info(
         "Base analytique mise a jour (poids individuels) : {} lignes, {} colonnes -> {}",
-        df.height, df.width, analytical_object,
+        df.height,
+        df.width,
+        analytical_object,
     )
 
-    model_object = f"{cfg.minio.models_prefix}declaration_indiv_model.pkl"
-    write_pickle(cfg.minio, cfg.minio.models_bucket, model_object, {
-        "model": model,
-        "auc": auc,
-        "features": cat_feats + num_feats,
-        "taux_declare": taux_declare,
-    })
-    logger.info("Modele de declaration individuelle sauvegarde : {}", model_object)
+    model_object = f"{cfg.minio.models_prefix}declaration_indiv_model.json"
+    classifier = model.named_steps["classifier"]
+    preprocessor = model.named_steps["preprocessor"]
+    write_json(
+        cfg.minio,
+        cfg.minio.models_bucket,
+        model_object,
+        {
+            "schema_version": 1,
+            "model_type": "logistic_regression_l2",
+            "diagnostics_oof": diagnostics.__dict__,
+            "features_raw": cat_feats + num_feats,
+            "features_encoded": preprocessor.get_feature_names_out().tolist(),
+            "coefficients": classifier.coef_.tolist(),
+            "intercept": classifier.intercept_.tolist(),
+            "taux_declare": taux_declare,
+        },
+    )
+    logger.info("Resume JSON du modele individuel sauvegarde : {}", model_object)
 
     return analytical_object
 

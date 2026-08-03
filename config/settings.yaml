@@ -18,14 +18,10 @@ paths:
 
 # --- Parametres d'ingestion ---
 ingestion:
-  # Format des fichiers source
-  file_pattern: "*.xlsx"
   # Convention de nommage: MM_YYYY.xlsx
   filename_regex: "^(\\d{2})_(\\d{4})\\.xlsx$"
   # Feuilles a ignorer (regex)
   skip_sheets: []
-  # Encodage par defaut
-  encoding: "utf-8"
 
 # --- Parametres de nettoyage ---
 cleaning:
@@ -55,22 +51,38 @@ cleaning:
   remove_duplicates: true
   # Duree travaillee max (mois)
   max_duration: 12
+  # Part maximale de valeurs numeriques non vides impossibles a parser.
+  numeric_parse_failure_threshold: 0.01
+  # Hypothese explicite pour TYPE_SALARIE non renseigne: monthly ou daily.
+  unknown_periodicity_assumption: "monthly"
 
 # --- Parametres de modelisation ---
 modeling:
-  # Nombre d'imputations multiples (Rubin, 1987)
+  # Parametre du prototype experimental 08, hors DAG de publication.
   n_imputations: 5
   # Graine aleatoire pour reproductibilite
   random_seed: 42
   # Trimming des poids IPW (percentiles)
   ipw_trim_lower: 0.01
   ipw_trim_upper: 0.99
-  # Methode d'estimation: "ipw", "aipw" (doublement robuste), "tmle"
-  estimation_method: "aipw"
-  # Seuil minimum AUC pour validation du modele
+  # Methode d'estimation implementee. AIPW et TMLE restent differes.
+  estimation_method: "ipw"
+  # Repere AUC descriptif (un score faible n'est jamais bloquant a lui seul)
   min_auc: 0.60
   # Pente de calibration acceptable
   calibration_slope_range: [0.8, 1.2]
+  # Portee: au moins une declaration dans les K mois strictement precedents.
+  # Utiliser "inf" pour conserver toutes les periodes depuis le debut a risque.
+  risk_window_months: 12
+  # Validation croisee groupee par employeur.
+  n_cv_splits: 5
+  # Diagnostics de positivite et de calibration.
+  propensity_clip: 0.000001
+  max_clipped_share: 0.01
+  max_trimmed_share: 0.05
+  max_calibration_in_large: 0.10
+  max_abs_smd: 0.25
+  min_structural_stratum_size: 30
 
 # --- Parametres d'estimation ---
 estimation:
@@ -80,6 +92,12 @@ estimation:
   confidence_level: 0.95
   # Plage de salaire plausible (FCFA)
   salary_plausible_range: [75000, 50000000]
+  # Secret statistique primaire.
+  min_distinct_individuals: 30
+  min_distinct_employers: 3
+  max_employer_wage_share: 0.85
+  # Aucun IC n'est diffuse tant que la linearisation conjointe p/q n'est pas validee.
+  inference_method: "point_only"
 
 # --- Stockage objet MinIO ---
 # Toutes les donnees du pipeline (brutes, intermediaires, modeles, exports)
@@ -95,27 +113,29 @@ estimation:
 #                                  -> LU par 01_lecture_fichiers.py
 #   processed_bucket/processed_prefix -> ECRIT par 01_lecture_fichiers.py (Excel -> Parquet)
 #                                  -> RE-ECRIT (en place) par 02_harmonisation_types.py
-#                                  -> LU par 03_nettoyage_donnees.py et audit_qualite.py
+#                                  -> LU par 03_nettoyage_donnees.py et audit.py
 #   cleaned_bucket/cleaned_prefix  -> ECRIT par 03_nettoyage_donnees.py (cnps_cleaned.parquet)
 #                                  -> ECRIT par 04_base_individus.py (individual_base.parquet)
 #                                  -> ECRIT par 05_base_entreprises.py (firm_base.parquet)
 #                                  -> ECRIT par 06_base_analytique.py (analytical_base.parquet)
 #                                  -> RE-ECRIT (en place) par 07_modele_declaration.py (firm_base.parquet + poids IPW)
-#                                  -> ECRIT par 08_imputation_salaires.py (firm_base_imputed.parquet)
 #                                  -> RE-ECRIT (en place) par 09_ponderation_finale.py (analytical_base.parquet + W_FINAL)
 #                                  -> LU par 10_estimation_indicateurs.py et 11_validation_qualite.py
-#   models_bucket/models_prefix    -> ECRIT par 07_modele_declaration.py (declaration_model.pkl)
-#                                  -> ECRIT par 08_imputation_salaires.py (imputation_model.pkl)
+#   models_bucket/models_prefix    -> ECRIT par 07/07b (resumes JSON non executables)
+#   Le prototype 08, hors publication, ecrit aussi un resume JSON s'il est lance seul.
 #                                  -> LU par 11_validation_qualite.py
 #   output_bucket/output_prefix    -> ECRIT par 12_export_excel.py (indicateurs_cnps.xlsx)
-#                                  -> ECRIT par audit_qualite.py (audit_fichiers_cnps_*.xlsx)
+#                                  -> ECRIT par audit.py (audit_fichiers_cnps_*.xlsx)
 #                                  -> ECRIT par pipeline.py (sessions/{id}/metadata.json)
-#                                  -> LU par 05_1_jointure_anstat.py (REQUETES_ANSTAT_MODULE_EMPLOYEURS.xlsx,
+#                                  -> LU par jointure_anstat.py (REQUETES_ANSTAT_MODULE_EMPLOYEURS.xlsx,
 #                                     depose manuellement dans raw_bucket/raw_prefix racine)
 #
 # Voir le README (section "Le fil d'execution") pour le detail complet
 # entrees/sorties de chaque etape.
 minio:
+  # Le mode production exige TLS et des secrets explicites.
+  environment: "development"
+  allow_insecure_minio: true
   # Adresse du serveur MinIO (reseau interne)
   endpoint: "192.168.1.230:30137"
   # Fichiers Excel bruts (MM_YYYY.xlsx).
@@ -130,13 +150,13 @@ minio:
   # Donnees nettoyees et bases structurees (individus, entreprises, analytique)
   cleaned_bucket: "gold"
   cleaned_prefix: "cnps/"
-  # Modeles sauvegardes (.pkl)
+  # Resumes de modeles et diagnostics sauvegardes en JSON non executable
   models_bucket: "models"
   models_prefix: "cnps/"
   # Exports Excel finaux (indicateurs, rapports, audits, sessions)
   output_bucket: "staging"
   output_prefix: "cnps/exports_gold/"
-  # Connexion chiffree (le serveur interne tourne en HTTP simple)
+  # Connexion chiffree (HTTP permis uniquement en development avec opt-in explicite)
   secure: false
 
 # --- Parallelisation ---

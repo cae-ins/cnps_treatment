@@ -33,17 +33,25 @@ from cnps.storage import list_objects, read_parquet, write_parquet
 
 # Colonnes et leur type cible. Les colonnes non listees sont laissees telles quelles.
 _NUMERIC_COLS = [
-    "SALAIRE_BRUT", "DUREE_TRAVAILLEE", "SALAIRE_BRUT_MENS",
-    "EFFECTIF", "EFFECTIF_DECLARE", "EFFECTIF_SALARIES",
+    "SALAIRE_BRUT",
+    "DUREE_TRAVAILLEE",
+    "SALAIRE_BRUT_MENS",
+    "EFFECTIF",
+    "EFFECTIF_DECLARE",
+    "EFFECTIF_SALARIES",
 ]
 
 _DATE_COLS = [
-    "DATE_NAISSANCE", "DATE_EMBAUCHE", "DATE_IMMATRICULATION",
+    "DATE_NAISSANCE",
+    "DATE_EMBAUCHE",
+    "DATE_IMMATRICULATION",
     "DATE_IMMAT_EMPLOYEUR",
 ]
 
 _ID_COLS = [
-    "ID_INDIV", "ID_EMPLOI", "ID_EMPLOYEUR",
+    "ID_INDIV",
+    "ID_EMPLOI",
+    "ID_EMPLOYEUR",
 ]
 
 _INTEGER_COLS = ["EFFECTIF", "EFFECTIF_DECLARE", "EFFECTIF_SALARIES"]
@@ -56,24 +64,55 @@ _EXCEL_ORIGIN = datetime(1899, 12, 30)
 # Helpers internes
 # ---------------------------------------------------------------------------
 
+
 def _normalize_column_names(df: pl.DataFrame) -> pl.DataFrame:
     """Majuscules, espaces en debut/fin retires, espaces internes en underscore."""
-    rename_map = {
-        col: col.strip().upper().replace(" ", "_")
-        for col in df.columns
-    }
+    rename_map = {col: col.strip().upper().replace(" ", "_") for col in df.columns}
     return df.rename(rename_map)
 
 
-def _coerce_numeric(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
-    """Force les colonnes en Float64 (ou Int64 pour les effectifs), null si non numerique."""
+def _coerce_numeric(
+    df: pl.DataFrame,
+    cols: list[str],
+    failure_threshold: float,
+) -> pl.DataFrame:
+    """Parse les formats francais/internationaux et bloque les pertes excessives."""
     for col in cols:
         if col in df.columns:
-            df = df.with_columns(
-                pl.col(col).cast(pl.Utf8).str.replace_all(r"[^\d.\-]", "")
-                .cast(pl.Float64, strict=False)
-                .alias(col)
+            raw = pl.col(col).cast(pl.Utf8).str.strip_chars()
+            cleaned = raw.str.replace_all(r"[\s\u00A0\u202F']", "").str.replace_all(
+                r"[^\d,.\-]", ""
             )
+            european = cleaned.str.contains(r"^-?\d{1,3}(?:\.\d{3})+,\d+$")
+            international = cleaned.str.contains(r"^-?\d{1,3}(?:,\d{3})+\.\d+$")
+            comma_only = cleaned.str.contains(",") & ~cleaned.str.contains(r"\.")
+            normalized = (
+                pl.when(european)
+                .then(cleaned.str.replace_all(r"\.", "").str.replace(",", "."))
+                .when(international)
+                .then(cleaned.str.replace_all(",", ""))
+                .when(comma_only)
+                .then(cleaned.str.replace(",", "."))
+                .otherwise(cleaned.str.replace_all(",", ""))
+            )
+            parsed = normalized.cast(pl.Float64, strict=False)
+            nonempty = raw.is_not_null() & (raw != "")
+            n_nonempty = int(df.select(nonempty.sum()).item())
+            n_failed = int(df.select((nonempty & parsed.is_null()).sum()).item())
+            failure_share = n_failed / n_nonempty if n_nonempty else 0.0
+            logger.info(
+                "Parsing numerique {} : {} echec(s) sur {} valeurs non vides ({:.3%}).",
+                col,
+                n_failed,
+                n_nonempty,
+                failure_share,
+            )
+            if failure_share > failure_threshold:
+                raise ValueError(
+                    f"Echec de parsing numerique trop frequent pour {col}: "
+                    f"{failure_share:.3%} > {failure_threshold:.3%}."
+                )
+            df = df.with_columns(parsed.alias(col))
             if col in _INTEGER_COLS:
                 df = df.with_columns(pl.col(col).cast(pl.Int64, strict=False).alias(col))
     return df
@@ -100,9 +139,12 @@ def _parse_date_column(series: pl.Series) -> pl.Series:
     if series.dtype.base_type() == pl.Duration:
         temp = pl.DataFrame({name: series})
         result = temp.select(
-            (pl.lit(_EXCEL_ORIGIN).cast(pl.Date)
-             + (pl.col(name).dt.total_days() * _MS_PER_DAY)
-               .cast(pl.Int64).cast(pl.Duration("ms")))
+            (
+                pl.lit(_EXCEL_ORIGIN).cast(pl.Date)
+                + (pl.col(name).dt.total_days() * _MS_PER_DAY)
+                .cast(pl.Int64)
+                .cast(pl.Duration("ms"))
+            )
             .cast(pl.Date)
             .alias(name)
         )[name]
@@ -129,9 +171,10 @@ def _parse_date_column(series: pl.Series) -> pl.Series:
         # Duration Polars ne supporte que ns/us/ms, donc conversion jours -> ms
         temp = pl.DataFrame({"_parsed": parsed, "_days": numeric})
         excel_dates = temp.select(
-            (pl.lit(_EXCEL_ORIGIN).cast(pl.Date)
-             + (pl.col("_days") * _MS_PER_DAY)
-               .cast(pl.Int64).cast(pl.Duration("ms")))
+            (
+                pl.lit(_EXCEL_ORIGIN).cast(pl.Date)
+                + (pl.col("_days") * _MS_PER_DAY).cast(pl.Int64).cast(pl.Duration("ms"))
+            )
             .cast(pl.Date)
             .alias("_excel")
         )["_excel"]
@@ -163,6 +206,7 @@ def _ensure_string_ids(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
 # API publique
 # ---------------------------------------------------------------------------
 
+
 def harmoniser_types(cfg: PipelineConfig) -> list[str]:
     """
     Harmonise les types de colonnes sur tous les Parquets mensuels de MinIO.
@@ -185,7 +229,9 @@ def harmoniser_types(cfg: PipelineConfig) -> list[str]:
     files = sorted(obj for obj in all_objects if re.search(r"\.parquet$", obj))
 
     if not files:
-        logger.warning("Aucun fichier Parquet trouve sous {}/{}", bucket, cfg.minio.processed_prefix)
+        logger.warning(
+            "Aucun fichier Parquet trouve sous {}/{}", bucket, cfg.minio.processed_prefix
+        )
         return []
 
     result_objects: list[str] = []
@@ -196,7 +242,11 @@ def harmoniser_types(cfg: PipelineConfig) -> list[str]:
 
         df = _normalize_column_names(df)
         df = _ensure_string_ids(df, _ID_COLS)
-        df = _coerce_numeric(df, _NUMERIC_COLS)
+        df = _coerce_numeric(
+            df,
+            _NUMERIC_COLS,
+            cfg.cleaning.numeric_parse_failure_threshold,
+        )
         df = _coerce_dates(df, _DATE_COLS)
 
         write_parquet(cfg.minio, bucket, object_name, df)
@@ -205,8 +255,11 @@ def harmoniser_types(cfg: PipelineConfig) -> list[str]:
 
         logger.info("  {} -> {} lignes, {} colonnes", object_name, df.height, df.width)
 
-    logger.info("Harmonisation des types terminee pour {} fichiers, {} lignes au total",
-                len(result_objects), total_rows)
+    logger.info(
+        "Harmonisation des types terminee pour {} fichiers, {} lignes au total",
+        len(result_objects),
+        total_rows,
+    )
     return result_objects
 
 
@@ -234,7 +287,10 @@ if __name__ == "__main__":
     )
     logger.add(
         str(cfg.paths.logs / f"{Path(__file__).stem}.log"),
-        level="DEBUG", rotation="10 MB", retention="30 days", encoding="utf-8",
+        level="DEBUG",
+        rotation="10 MB",
+        retention="30 days",
+        encoding="utf-8",
     )
 
     try:

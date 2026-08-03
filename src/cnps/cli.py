@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from typing import Optional
 
 import typer
 from loguru import logger
@@ -55,7 +54,7 @@ console = Console()
 def _setup_logging(cfg, verbose: bool = False) -> None:
     """Configure les sorties de journalisation (loguru)."""
     logger.remove()
-    level = "DEBUG" if verbose else "INFO"
+    level = "DEBUG" if verbose else cfg.logging.level
 
     logger.add(
         lambda msg: console.print(msg, end=""),
@@ -67,30 +66,49 @@ def _setup_logging(cfg, verbose: bool = False) -> None:
     log_path = cfg.paths.logs / "pipeline.log"
     logger.add(
         str(log_path),
-        level="DEBUG",
-        rotation="10 MB",
-        retention="30 days",
+        level=level,
+        rotation=cfg.logging.rotation,
+        retention=cfg.logging.retention,
         encoding="utf-8",
     )
+
+
+def _raise_on_pipeline_failure(result) -> None:
+    """Propage un echec du pipeline au code de retour de la commande."""
+    if not result.success:
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------
 # Commandes
 # ---------------------------------------------------------------------------
 
+
 @app.command()
 def run(
-    settings: Optional[Path] = typer.Option(
-        None, "--settings", "-s", help="Chemin vers settings.yaml",
+    settings: Path | None = typer.Option(
+        None,
+        "--settings",
+        "-s",
+        help="Chemin vers settings.yaml",
     ),
-    dimensions: Optional[Path] = typer.Option(
-        None, "--dimensions", "-d", help="Chemin vers dimensions.yaml",
+    dimensions: Path | None = typer.Option(
+        None,
+        "--dimensions",
+        "-d",
+        help="Chemin vers dimensions.yaml",
     ),
     from_stage: str = typer.Option(
-        "LECTURE_FICHIERS", "--from", "-f", help="Premiere etape a executer",
+        "LECTURE_FICHIERS",
+        "--from",
+        "-f",
+        help="Premiere etape a executer",
     ),
     to_stage: str = typer.Option(
-        "EXPORT_EXCEL", "--to", "-t", help="Derniere etape a executer",
+        "EXPORT_EXCEL",
+        "--to",
+        "-t",
+        help="Derniere etape a executer",
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -123,55 +141,60 @@ def run(
 
     table.add_row("TOTAL", "", f"{result.total_duration_seconds:.1f}s", style="bold")
     console.print(table)
+    _raise_on_pipeline_failure(result)
 
 
 @app.command()
 def ingest(
-    settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
+    settings: Path | None = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Execute uniquement l'ingestion (Excel -> Parquet + harmonisation des types)."""
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
-    run_pipeline(cfg, Stage.LECTURE_FICHIERS, Stage.HARMONISATION_TYPES)
+    result = run_pipeline(cfg, Stage.LECTURE_FICHIERS, Stage.HARMONISATION_TYPES)
+    _raise_on_pipeline_failure(result)
 
 
 @app.command()
 def clean(
-    settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
+    settings: Path | None = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Execute le nettoyage et la structuration des bases."""
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
-    run_pipeline(cfg, Stage.NETTOYAGE_DONNEES, Stage.BASE_ANALYTIQUE)
+    result = run_pipeline(cfg, Stage.NETTOYAGE_DONNEES, Stage.BASE_ANALYTIQUE)
+    _raise_on_pipeline_failure(result)
 
 
 @app.command()
 def model(
-    settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
+    settings: Path | None = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Execute la modelisation (declaration, imputation, ponderation)."""
+    """Execute les deux modeles de reponse puis la ponderation IPW."""
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
-    run_pipeline(cfg, Stage.MODELE_DECLARATION, Stage.PONDERATION_FINALE)
+    result = run_pipeline(cfg, Stage.MODELE_DECLARATION, Stage.PONDERATION_FINALE)
+    _raise_on_pipeline_failure(result)
 
 
 @app.command()
 def estimate(
-    settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
+    settings: Path | None = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Execute l'estimation des indicateurs et l'export Excel."""
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
-    run_pipeline(cfg, Stage.ESTIMATION_INDICATEURS, Stage.EXPORT_EXCEL)
+    result = run_pipeline(cfg, Stage.ESTIMATION_INDICATEURS, Stage.EXPORT_EXCEL)
+    _raise_on_pipeline_failure(result)
 
 
 @app.command()
 def enrich_anstat(
-    settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
+    settings: Path | None = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """
@@ -185,29 +208,43 @@ def enrich_anstat(
     cfg = load_config(settings)
     _setup_logging(cfg, verbose)
 
-    anstat_module = importlib.import_module("cnps.05_1_jointure_anstat")
+    anstat_module = importlib.import_module("cnps.jointure_anstat")
     out = anstat_module.enrichir_avec_anstat(cfg)
     console.print(f"[bold green]Base entreprises enrichie (ANSTAT):[/bold green] {out}")
 
 
 @app.command()
 def audit(
-    settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
-    input_bucket: Optional[str] = typer.Option(
-        None, "--input-bucket", help="Bucket MinIO des parquets a auditer (defaut: processed_bucket)",
+    settings: Path | None = typer.Option(None, "--settings", "-s"),
+    input_bucket: str | None = typer.Option(
+        None,
+        "--input-bucket",
+        help="Bucket MinIO des parquets a auditer (defaut: processed_bucket)",
     ),
-    input_prefix: Optional[str] = typer.Option(
-        None, "--input", "-i", help="Prefixe MinIO des parquets a auditer (defaut: processed_prefix)",
+    input_prefix: str | None = typer.Option(
+        None,
+        "--input",
+        "-i",
+        help="Prefixe MinIO des parquets a auditer (defaut: processed_prefix)",
     ),
-    output_bucket: Optional[str] = typer.Option(
-        None, "--output-bucket", help="Bucket MinIO pour le rapport Excel (defaut: output_bucket)",
+    output_bucket: str | None = typer.Option(
+        None,
+        "--output-bucket",
+        help="Bucket MinIO pour le rapport Excel (defaut: output_bucket)",
     ),
-    output_prefix: Optional[str] = typer.Option(
-        None, "--output", "-o", help="Prefixe MinIO pour le rapport Excel (defaut: output_prefix)",
+    output_prefix: str | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Prefixe MinIO pour le rapport Excel (defaut: output_prefix)",
     ),
-    salary_var: str = typer.Option("SALAIRE_BRUT", "--salary-var", help="Colonne pour la detection de valeurs extremes"),
+    salary_var: str = typer.Option(
+        "SALAIRE_BRUT", "--salary-var", help="Colonne pour la detection de valeurs extremes"
+    ),
     id_var: str = typer.Option("ID_INDIV", "--id-var", help="Colonne pour le controle d'unicite"),
-    type_var: str = typer.Option("TYPE_SALARIE", "--type-var", help="Colonne de periodicite du salaire (M/J/H)"),
+    type_var: str = typer.Option(
+        "TYPE_SALARIE", "--type-var", help="Colonne de periodicite du salaire (M/J/H)"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Execute un audit qualite complet et genere un rapport Excel."""
@@ -230,7 +267,7 @@ def audit(
 
 @app.command()
 def validate(
-    settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
+    settings: Path | None = typer.Option(None, "--settings", "-s"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Execute tous les controles de validation."""
@@ -248,19 +285,25 @@ def validate(
 
     for issue in report.issues:
         level_style = {
-            "ERROR": "red", "WARNING": "yellow", "INFO": "green",
+            "ERROR": "red",
+            "WARNING": "yellow",
+            "INFO": "green",
         }.get(issue.level, "white")
         table.add_row(
             f"[{level_style}]{issue.level}[/{level_style}]",
-            issue.stage, issue.check, issue.message,
+            issue.stage,
+            issue.check,
+            issue.message,
         )
 
     console.print(table)
+    if not report.is_valid:
+        raise typer.Exit(1)
 
 
 @app.command()
 def config(
-    settings: Optional[Path] = typer.Option(None, "--settings", "-s"),
+    settings: Path | None = typer.Option(None, "--settings", "-s"),
 ) -> None:
     """Affiche la configuration courante."""
     cfg = load_config(settings)

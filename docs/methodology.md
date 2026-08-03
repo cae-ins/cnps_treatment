@@ -1,313 +1,213 @@
-# Note Methodologique — Pipeline de Traitement CNPS v2.0
+# Méthodologie du pipeline CNPS
 
-## 1. Contexte et objectifs
+Version alignée sur le code de la branche `fix/audit-phase-b` au 1er août 2026.
 
-Ce pipeline traite les declarations salariales mensuelles de la **Caisse Nationale de Prevoyance Sociale (CNPS)** de Cote d'Ivoire pour produire des indicateurs statistiques sur la distribution des salaires.
+## 1. Objet, unité et population visée
 
-Le probleme central est la **non-declaration** : toutes les entreprises ne declarent pas chaque mois. Si l'on estimait les statistiques uniquement sur les entreprises declarantes, on obtiendrait des estimations biaisees (biais de selection).  Le pipeline corrige ce biais par des methodes econometriques.
+Le pipeline décrit la distribution des salaires des couples **salarié–employeur–mois** observables dans les déclarations CNPS. Un cumul sur plusieurs mois décrit un ensemble de lignes salarié–employeur–mois : une personne présente plusieurs mois contribue plusieurs fois. Les tableaux non mensuels portent donc explicitement la mention « cumul sur la période ».
 
----
+L'univers ne couvre pas :
 
-## 2. Flux de donnees
+- les employeurs absents de tous les fichiers ;
+- les salariés dont aucune ligne n'existe dans les sources ;
+- les salaires manquants qui ne peuvent être représentés par une ligne salarié existante.
 
-Toutes les donnees (entrees et sorties de chaque etape) vivent sur MinIO,
-jamais sur disque local, reparties sur plusieurs buckets distincts
-(organisation medaillon : raw/processed/cleaned/models/output). Chaque
-etape correspond a un fichier numerote dans `src/cnps/` (voir le
-[README](../README.md) pour le detail bucket+prefixe de chacune) :
+Cette portée interdit d'interpréter les résultats comme une mesure exhaustive de tous les salariés ou de toute l'économie ivoirienne.
 
-```
-Excel bruts (raw_bucket/raw_prefix/MM_YYYY.xlsx)
-    |
-    v
-[01. lecture_fichiers] -------> Parquet (compression zstd)
-    |
-    v
-[02. harmonisation_types] ----> Types uniformes (dates, numeriques, identifiants)
-    |
-    v
-[03. nettoyage_donnees] ------> Variables derivees + concatenation
-    |
-    v
-[04. base_individus] ---------> Base au niveau individu
-    |
-    v
-[05. base_entreprises] -------> Panel entreprise-mois equilibre
-    |
-    v
-[06. base_analytique] --------> Fusion individus + entreprises
-    |
-    v
-[07. modele_declaration] -----> Score de propension (logit) + poids IPW
-    |
-    v
-[08. imputation_salaires] ----> Imputation multiple (M=5) des salaires manquants
-    |
-    v
-[09. ponderation_finale] -----> Poids final IPW ou AIPW (doublement robuste)
-    |
-    v
-[10. estimation_indicateurs] -> Statistiques ponderees par dimension (regles de Rubin)
-    |
-    +----------------------+
-    v                      v
-[11. validation_qualite]  [12. export_excel] --> indicateurs_cnps.xlsx (output_bucket/output_prefix)
+## 2. Données et traitement
+
+### 2.1 Ingestion et types
+
+Les classeurs mensuels sont convertis en Parquet. Les noms de colonnes sont normalisés. Les montants acceptent les écritures françaises et internationales (`1.234,56`, `1,234.56`, espaces simples ou insécables). Le taux d'échec de parsing est journalisé et devient bloquant au-delà de `numeric_parse_failure_threshold`.
+
+Les durées et âges sont calculés par rapport au dernier jour du mois de déclaration, jamais par rapport à la date d'exécution. Une réexécution sur les mêmes entrées produit donc les mêmes classes d'âge et d'ancienneté.
+
+### 2.2 Déduplication
+
+Les doublons stricts sont retirés. Pour une clé complète `(ID_INDIV, ID_EMPLOYEUR, période)`, une seule ligne est conservée, celle au salaire le plus élevé. Les cumuls d'emplois auprès d'employeurs différents ne sont pas dédupliqués.
+
+Une clé contenant au moins un identifiant nul n'est pas dédupliquée : la ligne est conservée et marquée `CLE_DEDUP_INCOMPLETE=1`. Cette règle évite que plusieurs personnes inconnues soient fusionnées par l'égalité artificielle de valeurs nulles.
+
+### 2.3 Périodicité et salaire mensuel
+
+Le salaire de référence non winsorisé est `SALAIRE_BRUT_ESTIME_AU_MOIS` :
+
+- mensuel : montant inchangé ;
+- journalier : montant multiplié par 22,4 jours ouvrés ;
+- horaire : montant multiplié par 179,2 heures ;
+- périodicité inconnue : hypothèse explicite `monthly` par défaut, configurable en `daily` pour sensibilité.
+
+Le seuil de salaire est appliqué dans l'unité cohérente avec la périodicité. Le nombre de lignes à périodicité inconnue et le nombre exclu sous cette hypothèse sont journalisés.
+
+`SALAIRE_BRUT_ESTIME_AU_MOIS_W` est une copie winsorisée après conversion. La moyenne et la variance descriptive utilisent cette colonne. Les quantiles, le Gini et les extrêmes observés utilisent la colonne non winsorisée.
+
+## 3. Panel entreprise et champ à risque
+
+### 3.1 Définition de la réponse employeur
+
+Pour l'employeur `j` au mois `t` :
+
+```text
+D_jt = 1 si EFFECTIF_DECLARE > 0, sinon 0
 ```
 
----
+`D_jt=1` implique par construction un salaire moyen positif et fini. Toute coexistence de `D_jt=1` avec un salaire moyen nul, négatif, manquant ou non fini provoque un échec.
 
-## 3. Methodes statistiques
+### 3.2 Bornes du panel
 
-### 3.1. Modele de declaration (Score de propension)
+La borne gauche est le mois d'immatriculation de l'employeur, ou sa première apparition si la date manque. Une troncature au début du panel et l'imputation de cette borne sont marquées séparément.
 
-**Objectif** : Estimer P(D_jt = 1 | X_jt), la probabilite qu'une entreprise j declare au mois t.
+Aucune cessation n'est inférée de la dernière déclaration. Faute de registre de radiation, chaque entreprise est prolongée jusqu'à la fin commune du panel. Les journaux distinguent troncatures gauches, débuts imputés, cessations observées (zéro en l'absence de registre) et fins censurées.
 
-**Modele** : Regression logistique (logit)
+### 3.3 Fenêtre glissante
 
-```
-logit(P(D_jt = 1)) = beta_0 + beta_1 * SECTEUR + beta_2 * TAILLE
-                    + beta_3 * AGE_ENTREPRISE + beta_4 * D_{j,t-1}
-                    + beta_5 * TAUX_DECL_PASSE + gamma_t
-```
+Pour le mois `t`, `DANS_UNIVERS_RISQUE=1` si l'employeur a déclaré au moins une fois pendant les `K` mois **strictement antérieurs**. La valeur par défaut est `K=12`; `inf` conserve toutes les périodes postérieures à une déclaration passée. Le mois courant n'entre jamais dans la définition du champ, car cela ferait dépendre l'univers de la cible à prédire.
 
-**Covariables** :
-- Secteur d'activite (categoriel)
-- Taille d'entreprise en classes (categoriel)
-- Age de l'entreprise en classes (categoriel)
-- Declaration au mois precedent D_{j,t-1} (binaire)
-- Taux de declaration passe cumule (continu)
-- Effets fixes temporels gamma_t (mois)
+L'amorce, où moins de `K` mois antérieurs existent, est marquée `FENETRE_RISQUE_EXTENSIBLE`. Avant diffusion, les indicateurs centraux doivent être rejoués pour `K ∈ {6, 12, 24, inf}`.
 
-**Regularisation** : L2 (Ridge) avec C=1.0 pour eviter le surapprentissage.
+### 3.4 Covariables as-of
 
-**Evaluation** :
-- AUC (Area Under ROC Curve) : seuil minimal = 0.60
-- Calibration : pente de calibration dans [0.8, 1.2]
+Secteur, commune et taille sont propagés uniquement par dernière valeur antérieure connue. Aucune rétropropagation ne vient du futur. L'âge de l'entreprise est recalculé à chaque mois. Des indicateurs `JAMAIS_OBSERVE_AVANT_*` distinguent l'absence d'information antérieure d'une modalité économique réelle.
 
-**References** :
-- Rosenbaum, P.R. & Rubin, D.B. (1983). "The central role of the propensity score in observational studies for causal effects." *Biometrika*, 70(1), 41-55.
-- Cole, S.R. & Hernan, M.A. (2008). "Constructing inverse probability weights for marginal structural models." *American Journal of Epidemiology*, 168(6), 656-664.
+## 4. Modèles de réponse
 
----
+### 4.1 Premier étage : employeur
 
-### 3.2. Ponderation par probabilite inverse (IPW)
+Le premier modèle estime :
 
-**Principe** : Chaque observation declarante recoit un poids inversement proportionnel a sa probabilite de declaration. Les entreprises qui declarent malgre un profil typiquement "non-declarant" recoivent un poids plus eleve, car elles representent davantage d'entreprises similaires.
-
-**Formule** (poids stabilises, Robins et al., 2000) :
-
-```
-w_jt = P(D=1) / p_hat_jt
+```text
+p_jt = P(D_jt = 1 | X_jt)
 ```
 
-ou p_hat_jt est le score de propension estime.
+par régression logistique L2. Les covariables disponibles à date incluent secteur, taille, âge d'entreprise, réponse du mois précédent, taux de réponse passé et indicateurs de début/manque d'historique.
 
-**Stabilisation** : Les poids stabilises utilisent la probabilite marginale au numerateur plutot que 1. Cela reduit la variance des poids tout en preservant la consistance de l'estimateur (Robins et al., 2000).
+### 4.2 Second étage : ligne salarié
 
-**Troncature (trimming)** : Les poids extremes sont tronques aux percentiles configures (par defaut 1er et 99eme) pour limiter l'inflation de variance (Cole & Hernan, 2008).
+Pour une ligne salarié existante dans une entreprise déclarante :
 
-**References** :
-- Horvitz, D.G. & Thompson, D.J. (1952). "A generalization of sampling without replacement from a finite universe." *JASA*, 47(260), 663-685.
-- Robins, J.M., Hernan, M.A. & Brumback, B. (2000). "Marginal structural models and causal inference in epidemiology." *Epidemiology*, 11(5), 550-560.
-- Lunceford, J.K. & Davidian, M. (2004). "Stratification and weighting via the propensity score in estimation of causal treatment effects." *Statistics in Medicine*, 23(19), 2937-2960.
-
----
-
-### 3.3. Estimation doublement robuste (AIPW)
-
-**Innovation v2** : L'estimateur AIPW (Augmented Inverse Probability Weighting) combine un modele de propension (P(D=1|X)) avec un modele de resultat (E[Y|X, D=1]). Il est **doublement robuste** : il reste consistant si *l'un ou l'autre* des deux modeles est correctement specifie.
-
-**Formule** :
-
-```
-mu_AIPW = (1/N) * sum_j [ D_j * Y_j / p_j  -  (D_j - p_j) / p_j * m(X_j) ]
+```text
+S_ijt = 1 si le salaire est positif et renseigné
+q_ijt = P(S_ijt = 1 | D_jt = 1, X_ijt, Z_jt)
 ```
 
-ou :
-- D_j = indicateur de declaration
-- Y_j = salaire observe
-- p_j = score de propension estime
-- m(X_j) = salaire predit par le modele de resultat (imputation)
+L'historique est calculé par couple `(ID_INDIV, ID_EMPLOYEUR)`. Un décalage n'est accepté comme « mois précédent » que si l'écart calendaire vaut exactement un. La complétude de l'entreprise vient de `firm_base` et est décalée d'un mois civil avant d'être jointe à toutes les lignes du couple entreprise–mois.
 
-**Avantage** : Si le modele de propension est mal specifie mais que le modele de resultat est bon, l'AIPW reste consistant (et vice versa). L'IPW classique ne beneficie pas de cette protection.
+`q_ijt` ne modélise pas un salarié entièrement omis du fichier, puisqu'aucun panel salarié exhaustif n'est disponible.
 
-**References** :
-- Robins, J.M., Rotnitzky, A. & Zhao, L.P. (1994). "Estimation of regression coefficients when some regressors are not always observed." *JASA*, 89(427), 846-866.
-- Bang, H. & Robins, J.M. (2005). "Doubly robust estimation in missing data and causal inference models." *Biometrics*, 61(4), 962-973.
-- Glynn, A.N. & Quinn, K.M. (2010). "An introduction to the augmented inverse propensity weighted estimator." *Political Analysis*, 18(1), 36-56.
+### 4.3 Diagnostics hors échantillon
 
----
+Les prédictions sont out-of-fold avec plis groupés par employeur. Sont calculés : AUC, score de Brier, pente de calibration, calibration-in-the-large, support des propensions et déséquilibre maximal des covariables après pondération.
 
-### 3.4. Imputation multiple
+L'AUC est descriptive. Une AUC de 0,5 est compatible avec un mécanisme MCAR et des poids corrects. Les motifs de blocage sont : classe cible unique, prédictions non finies, absence de recouvrement, mauvaise calibration, déséquilibre résiduel excessif, part de propensions clippées trop élevée et strate structurellement jamais répondante.
 
-**Objectif** : Pour les entreprises non-declarantes, imputer le salaire moyen manquant afin de :
-1. Fournir le modele de resultat m(X) pour l'AIPW
-2. Propager l'incertitude d'imputation dans les intervalles de confiance
+Les résumés de modèles sont des JSON non exécutables. Une pente non identifiable sous score quasi constant est enregistrée comme `null`.
 
-**Modele** : Regression lineaire sur log(salaire moyen)
+## 5. Poids et estimateurs
 
-```
-log(Y_jt) = X_jt * beta + epsilon_jt,    epsilon ~ N(0, sigma^2)
+### 5.1 Poids final
+
+L'indicateur de réponse complet est :
+
+```text
+R_ijt = D_jt × S_ijt
 ```
 
-**Covariables du modele de resultat** :
-- Secteur d'activite
-- Taille d'entreprise
-- Age de l'entreprise
-- Salaire moyen au mois precedent (lag)
-- Effectif observe au mois precedent (lag)
+Le poids brut est :
 
-**Procedure** :
-1. Estimer beta et sigma sur les entreprises declarantes
-2. Pour chaque entreprise non-declarante, generer M=5 imputations :
-   Y_jt^(m) = exp(X_jt * beta_hat + e^(m)),  e^(m) ~ N(0, sigma_hat^2)
-3. L'ajout de bruit residuel (bootstrap) preserve la variabilite d'imputation
-
-**Nombre d'imputations** : M=5 par defaut, suivant la recommandation de Rubin (1987) pour une fraction d'information manquante moderee. Pour FMI > 50%, augmenter M a 20+ (White et al., 2011).
-
-**References** :
-- Rubin, D.B. (1987). *Multiple Imputation for Nonresponse in Surveys.* John Wiley & Sons.
-- Van Buuren, S. & Groothuis-Oudshoorn, K. (2011). "mice: Multivariate Imputation by Chained Equations in R." *Journal of Statistical Software*, 45(3), 1-67.
-- White, I.R., Royston, P. & Wood, A.M. (2011). "Multiple imputation using chained equations: issues and guidance for practice." *Statistics in Medicine*, 30(4), 377-399.
-- Little, R.J.A. & Rubin, D.B. (2002). *Statistical Analysis with Missing Data* (2nd ed.). Wiley-Interscience.
-
----
-
-### 3.5. Regles de combinaison de Rubin
-
-Lorsque M datasets imputes sont disponibles, les estimations ponctuelles et les variances sont combinees par les regles de Rubin.
-
-**Formules** :
-
-| Quantite | Formule |
-|----------|---------|
-| Estimation combinee | Q_bar = (1/M) * sum(Q_m) |
-| Variance intra-imputation | U_bar = (1/M) * sum(U_m) |
-| Variance inter-imputation | B = (1/(M-1)) * sum((Q_m - Q_bar)^2) |
-| Variance totale | T = U_bar + (1 + 1/M) * B |
-| Degres de liberte | df = (M-1) * (1 + U_bar / ((1+1/M)*B))^2 |
-| Intervalle de confiance | Q_bar +/- t_{df, alpha/2} * sqrt(T) |
-| Fraction info. manquante | FMI = (B + B/M) / T |
-
-Les degres de liberte ajustes suivent Barnard & Rubin (1999) pour les petits echantillons.
-
-**References** :
-- Rubin, D.B. (1987). *Multiple Imputation for Nonresponse in Surveys.* Wiley.
-- Barnard, J. & Rubin, D.B. (1999). "Miscellanea. Small-sample degrees of freedom with multiple imputation." *Biometrika*, 86(4), 948-955.
-
----
-
-### 3.6. Estimateurs ponderes
-
-#### Moyenne ponderee (Horvitz-Thompson)
-
-```
-mu_w = sum(w_i * Y_i) / sum(w_i)
+```text
+W_FINAL_RAW = R_ijt / (p_hat_jt × q_hat_ijt)
 ```
 
-#### Variance ponderee (correction de Bessel/Kish)
+Le facteur `q` est neutre hors du domaine conditionnel (`q=1`, `W_INDIV=1`), mais `R_ijt=0` y impose un poids final nul. Les lignes hors univers à risque reçoivent également zéro. Les poids positifs sont tronqués aux quantiles configurés; la part tronquée est contrôlée.
 
-```
-sigma^2_w = [sum(w) / (sum(w)^2 - sum(w^2))] * sum(w_i * (Y_i - mu_w)^2)
-```
+Il ne s'agit pas d'un poids stabilisé : aucun taux marginal ne figure au numérateur. Il n'est pas non plus normalisé à moyenne 1. `n_weighted` n'est pas publié.
 
-Reference : Kish, L. (1965). *Survey Sampling.* Wiley.
+### 5.2 Statistiques
 
-#### Quantiles ponderes
+La moyenne est l'estimateur ratio de Hájek :
 
-Interpolation lineaire sur la CDF ponderee :
-
-```
-F_w(y) = sum(w_i * I(y_i <= y)) / sum(w_i)
+```text
+mu_hat = somme(w_i y_i) / somme(w_i)
 ```
 
-Le quantile q est obtenu par interpolation de l'inverse de F_w.
+La variance publiée est la dispersion descriptive pondérée avec correction de Kish. Ce n'est pas la variance de l'estimateur de moyenne.
 
-#### Coefficient de Gini pondere
+Les quantiles utilisent une fonction de répartition pondérée centrée :
 
-Formule par covariance (Lerman & Yitzhaki, 1989) :
-
-```
-G = (2 / (mu * sum(w))) * sum(w_i * Y_i * (F_w(Y_i) - 0.5))
+```text
+F_i = (cumul_w_i - w_i/2) / somme(w)
 ```
 
-Reference : Lerman, R.I. & Yitzhaki, S. (1989). "Improving the accuracy of estimates of Gini coefficients." *Journal of Econometrics*, 42(1), 43-47.
+Le Gini est pondéré selon la formulation de Lerman–Yitzhaki. Les minimum et maximum sont des extrêmes **observés** parmi les contributeurs à poids positif.
 
----
+### 5.3 Dimension temporelle
 
-### 3.7. Winsorisation
+Des séries mensuelles sont produites pour : national, secteur, sexe et taille réduite. Les dimensions fines restent cumulées et leur libellé indique « cumul sur la période ».
 
-Les valeurs extremes de salaire sont tronquees aux percentiles configures (defaut : 1% et 99%). Cela reduit l'influence des outliers sans supprimer d'observations.
+## 6. Inférence : état volontairement limité
 
-**References** :
-- Tukey, J.W. (1977). *Exploratory Data Analysis.* Addison-Wesley.
-- Dixon, W.J. (1960). "Simplified estimation from censored normal samples." *Annals of Mathematical Statistics*, 31(2), 385-391.
+Les données sont traitées comme une population finie affectée par la non-réponse, non comme un échantillon tiré d'une superpopulation. Un bootstrap naïf d'employeurs ajouterait une variance de tirage qui ne correspond pas à ce cadre.
 
----
+L'incertitude pertinente vient notamment de l'estimation conjointe de `p_hat` et `q_hat`, de leur covariance au niveau employeur et des non-linéarités introduites par clipping, trimming, quantiles et Gini. Cette variance n'est pas encore spécifiée de façon suffisamment complète.
 
-## 4. Choix techniques
+Conséquence :
 
-### 4.1. Polars vs R/dplyr (v1)
+- `inference_method` doit valoir `point_only` ;
+- chaque ligne publiée porte `POINT_ONLY_F1_PENDING` ;
+- toute colonne d'intervalle ou d'erreur-type est rejetée à la validation ;
+- l'imputation et les règles de Rubin sont hors publication ;
+- aucune revendication AIPW ou de double robustesse n'est faite.
 
-| Critere | R + dplyr (v1) | Python + Polars (v2) |
-|---------|----------------|----------------------|
-| Vitesse I/O | Stata .dta via haven | Parquet (zstd) — 5-10x plus rapide |
-| Traitement | Eager, single-thread | Lazy eval, multi-thread natif |
-| Memoire | Copie a chaque etape | Zero-copy, Apache Arrow |
-| Benchmark 1M lignes | ~45s | ~3s |
+## 7. Secret statistique
 
-Reference : Polars documentation — https://pola.rs/
+Une cellule est supprimée pour toutes ses statistiques si au moins une règle échoue :
 
-### 4.2. Parquet vs Stata (.dta)
+- moins de 30 individus distincts contributeurs ;
+- moins de 3 employeurs distincts contributeurs ;
+- un employeur représente plus de 85 % de la masse salariale observée non pondérée.
 
-| Format | Taille | Lecture 10M lignes | Compression |
-|--------|--------|--------------------|-------------|
-| Stata .dta | 100% | ~12s | Aucune |
-| Parquet (zstd) | ~25% | ~1.5s | Native |
+Les identifiants nuls ne comptent pas. Un contributeur doit avoir un salaire fini positif et un poids final positif. Si une seule cellule est supprimée dans une marge additive, la plus petite cellule publiée de cette même marge est supprimée en secondaire. Pour les tableaux mensuels croisés, cette règle s'applique séparément dans chaque mois.
 
-### 4.3. AIPW vs IPW (v1)
+Les seuils sont une garde de prépublication et non une doctrine institutionnelle définitive.
 
-| Propriete | IPW | AIPW |
-|-----------|-----|------|
-| Consistance | Si propension OK | Si propension OU resultat OK |
-| Efficacite | Sous-optimale | Semi-parametriquement efficace |
-| Robustesse | Sensible a p_hat | Doublement robuste |
-| Complexite | Simple | Moderee |
+## 8. Validation, export et filiation
 
----
+L'étape 11 revalide le schéma et les diagnostics OOF des résumés JSON, exige la
+présence des deux modèles, vérifie la cohérence de `W_FINAL` avec `D×S`, calcule
+l'effectif efficace (ESS), contrôle que les statistiques publiées sont finies et
+ordonnées, puis vérifie le masquage des cellules. Toute erreur empêche l'étape 12.
 
-## 5. Regles de suppression
+Excel applique trois décimales au Gini, des formats adaptés aux autres statistiques, et remplace les valeurs nulles ou non finies par un tiret.
 
-- Cellules avec N_pondere < 30 : supprimees (remplacees par "—")
-- Conforme aux standards de diffusion des statistiques officielles (INSEE, Eurostat)
+Chaque session reçoit un UUID et un manifeste comprenant l'empreinte de configuration, le commit, l'état sale du dépôt, les versions logicielles et la chaîne des sorties déclarées. Les secrets sont exclus. Les sorties canoniques restent réécrites en place : le manifeste le signale comme limite de reproductibilité historique.
 
----
+## 9. Validation hors ligne et limites ouvertes
 
-## 6. Bibliographie complete
+La suite synthétique compte 71 tests. Elle couvre notamment : parsing numérique,
+déduplication à clés nulles, cardinalité et unicité des jointures, calcul temporel,
+fenêtre de risque, absence d'information future, historique multi-employeur,
+contexte mensuel, MCAR, séparation des propensions, formule et provenance des
+poids, secret primaire/secondaire, routage des variables, revalidation des
+diagnostics sauvegardés, validation des sorties, export et configuration invalide.
 
-1. Bang, H. & Robins, J.M. (2005). "Doubly robust estimation in missing data and causal inference models." *Biometrics*, 61(4), 962-973.
-2. Barnard, J. & Rubin, D.B. (1999). "Miscellanea. Small-sample degrees of freedom with multiple imputation." *Biometrika*, 86(4), 948-955.
-3. Brick, J.M. & Kalton, G. (1996). "Handling missing data in survey research." *Statistical Methods in Medical Research*, 5(3), 215-238.
-4. Cole, S.R. & Hernan, M.A. (2008). "Constructing inverse probability weights for marginal structural models." *AJE*, 168(6), 656-664.
-5. Dixon, W.J. (1960). "Simplified estimation from censored normal samples." *Annals of Mathematical Statistics*, 31(2), 385-391.
-6. Glynn, A.N. & Quinn, K.M. (2010). "An introduction to the augmented inverse propensity weighted estimator." *Political Analysis*, 18(1), 36-56.
-7. Heckman, J.J. (1979). "Sample selection bias as a specification error." *Econometrica*, 47(1), 153-161.
-8. Heeringa, S.G., West, B.T. & Berglund, P.A. (2017). *Applied Survey Data Analysis* (2nd ed.). Chapman & Hall/CRC.
-9. Horvitz, D.G. & Thompson, D.J. (1952). "A generalization of sampling without replacement from a finite universe." *JASA*, 47(260), 663-685.
-10. Kish, L. (1965). *Survey Sampling.* Wiley.
-11. Lerman, R.I. & Yitzhaki, S. (1989). "Improving the accuracy of estimates of Gini coefficients." *Journal of Econometrics*, 42(1), 43-47.
-12. Little, R.J.A. & Rubin, D.B. (2002). *Statistical Analysis with Missing Data* (2nd ed.). Wiley-Interscience.
-13. Lumley, T. (2010). *Complex Surveys: A Guide to Analysis Using R.* Wiley.
-14. Lunceford, J.K. & Davidian, M. (2004). "Stratification and weighting via the propensity score in estimation of causal treatment effects." *Statistics in Medicine*, 23(19), 2937-2960.
-15. Robins, J.M., Hernan, M.A. & Brumback, B. (2000). "Marginal structural models and causal inference in epidemiology." *Epidemiology*, 11(5), 550-560.
-16. Robins, J.M., Rotnitzky, A. & Zhao, L.P. (1994). "Estimation of regression coefficients when some regressors are not always observed." *JASA*, 89(427), 846-866.
-17. Rosenbaum, P.R. & Rubin, D.B. (1983). "The central role of the propensity score in observational studies for causal effects." *Biometrika*, 70(1), 41-55.
-18. Rubin, D.B. (1987). *Multiple Imputation for Nonresponse in Surveys.* John Wiley & Sons.
-19. Steyerberg, E.W. et al. (2010). "Assessing the performance of prediction models." *Epidemiology*, 21(1), 128-138.
-20. Tukey, J.W. (1977). *Exploratory Data Analysis.* Addison-Wesley.
-21. Van Buuren, S. (2018). *Flexible Imputation of Missing Data* (2nd ed.). Chapman & Hall/CRC.
-22. Van Buuren, S. & Groothuis-Oudshoorn, K. (2011). "mice: Multivariate Imputation by Chained Equations in R." *Journal of Statistical Software*, 45(3), 1-67.
-23. Van der Laan, M.J. & Rose, S. (2011). *Targeted Learning.* Springer.
-24. White, I.R., Royston, P. & Wood, A.M. (2011). "Multiple imputation using chained equations." *Statistics in Medicine*, 30(4), 377-399.
-25. Wooldridge, J.M. (2007). "Inverse probability weighted estimation for general missing data problems." *Journal of Econometrics*, 141(2), 1281-1301.
-26. Wooldridge, J.M. (2010). *Econometric Analysis of Cross Section and Panel Data* (2nd ed.). MIT Press.
+Le protocole `docs/protocole_tests_dgp.md` définit les scénarios Monte-Carlo,
+graines, sorties et critères de recette encore nécessaires pour étudier le biais,
+les limites d'identification et, après implémentation de F.1, la couverture.
+
+Les vérifications sur valeurs réelles, les sensibilités `K` et la comparaison CIAP/comptabilité nationale nécessitent les entrées MinIO et ne sont pas revendiquées dans cette version hors VPN.
+
+Les limites méthodologiques ouvertes sont :
+
+1. variance F.1 et validation de couverture ;
+2. absence de registre de cessation ;
+3. absence de panel salarié exhaustif pour les lignes totalement omises ;
+4. objets canoniques MinIO non immuables ;
+5. validation institutionnelle des seuils de confidentialité et de la table de passage CIAP–NAPCN.
+
+## Références principales
+
+- Hájek, J. (1971), *Comment on An Essay on the Logical Foundations of Survey Sampling*.
+- Kish, L. (1965), *Survey Sampling*.
+- Lerman, R. I. et Yitzhaki, S. (1989), « Improving the Accuracy of Estimates of Gini Coefficients ».
+- Lumley, T. (2010), *Complex Surveys*.
+- Wooldridge, J. M. (2007), « Inverse Probability Weighted Estimation for General Missing Data Problems ».

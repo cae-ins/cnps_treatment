@@ -16,9 +16,24 @@ data/
 logs/
 sessions/
 models/
+output/
+*.dta
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+
+# Local reference papers (the published methodology PDF lives under docs/)
+/*.pdf
 
 # Secrets
 .env
+.Renviron
+
+# Local task scratch
+.task_tmp/
 
 # OS
 .DS_Store

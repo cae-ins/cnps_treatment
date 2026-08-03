@@ -5,16 +5,15 @@ Pipeline de traitement statistique des declarations salariales
 de la Caisse Nationale de Prevoyance Sociale (CNPS) - Cote d'Ivoire.
 
 Methodologie:
-- Estimation doublement robuste (AIPW) pour la correction du biais de non-declaration
-- Imputation multiple par equations chainees (MICE) avec regles de Rubin
-- Traitement parallele via Polars (lazy evaluation) et Joblib
+- Estimation ponctuelle IPW a deux etages pour la non-reponse
+- Diagnostics hors echantillon groupes par employeur
+- Secret statistique primaire et suppression secondaire
+- Traitement parallele de l'ingestion via Polars et Joblib
 
 References:
-    Robins, Rotnitzky & Zhao (1994). Estimation of regression coefficients
-        when some regressors are not always observed. JASA, 89(427), 846-866.
-    Rubin (1987). Multiple Imputation for Nonresponse in Surveys. Wiley.
-    Bang & Robins (2005). Doubly robust estimation in missing data and
-        causal inference models. Biometrics, 61(4), 962-973.
+    Wooldridge (2007). Inverse probability weighted estimation for general
+        missing data problems. Journal of Econometrics, 141(2), 1281-1301.
+    Lumley (2010). Complex Surveys. Wiley.
 """
 
 __version__ = "2.0.0"

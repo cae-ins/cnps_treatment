@@ -11,7 +11,7 @@ Variables derivees
 ------------------
 - ``AGE_EMPLOYE`` : age en annees depuis ``DATE_NAISSANCE``
 - ``ANCIENNETE_ENTREPRISE`` : anciennete en annees depuis ``DATE_EMBAUCHE``
-- ``ANCIENNETE_IMMAT`` : anciennete d'immatriculation de l'employé 
+- ``ANCIENNETE_IMMAT`` : anciennete d'immatriculation de l'employé
 - ``AGE_ENTREPRISE_IMMAT`` : age de l'entreprise depuis ``DATE_IMMAT_EMPLOYEUR``
 - ``SALAIRE_BRUT_MENS`` : salaire mensuel = SALAIRE_BRUT / max(DUREE_TRAVAILLEE, 1) * 12
 - Variables de classe (age, anciennete, taille d'entreprise)
@@ -27,18 +27,18 @@ Dixon, W. J. (1960). Simplified estimation from censored normal samples.
 from __future__ import annotations
 
 import re
-from datetime import date
 
 import polars as pl
 from loguru import logger
 
-from cnps.config import PipelineConfig, load_config
+from cnps.config import DimensionDef, PipelineConfig, load_config
 from cnps.storage import list_objects, read_parquet, write_parquet
-
+from cnps.temporal import add_reference_date, completed_years_expr
 
 # ---------------------------------------------------------------------------
 # Helpers de classification
 # ---------------------------------------------------------------------------
+
 
 def _classify(value_col: str, breaks: list[tuple[float, float, str]]) -> pl.Expr:
     """
@@ -49,49 +49,25 @@ def _classify(value_col: str, breaks: list[tuple[float, float, str]]) -> pl.Expr
     value_col : str
         Colonne a classifier.
     breaks : list de (min, max, label)
-        Bornes inferieure incluse, superieure exclue, et etiquette.
+        Bornes inferieure et superieure inclusives, et etiquette.
     """
     expr = pl.when(pl.col(value_col).is_null()).then(pl.lit(None).cast(pl.Utf8))
     for lo, hi, label in breaks:
-        expr = expr.when(
-            (pl.col(value_col) >= lo) & (pl.col(value_col) < hi)
-        ).then(pl.lit(label))
+        expr = expr.when((pl.col(value_col) >= lo) & (pl.col(value_col) <= hi)).then(pl.lit(label))
     return expr.otherwise(pl.lit(None).cast(pl.Utf8))
 
 
-_AGE_CLASSES = [
-    (0, 25, "Moins de 25 ans"),
-    (25, 35, "25-34 ans"),
-    (35, 50, "35-49 ans"),
-    (50, 999, "50 ans et plus"),
-]
+def _dimension_breaks(dimensions: list[DimensionDef], name: str) -> list[tuple[float, float, str]]:
+    """Retourne les classes normatives d'une dimension chargee depuis le YAML."""
+    dimension = next((dim for dim in dimensions if dim.name == name), None)
+    if dimension is None or not dimension.classes:
+        raise ValueError(
+            f"Classes absentes pour la dimension '{name}' dans config/dimensions.yaml."
+        )
+    return [
+        (class_def["min"], class_def["max"], class_def["label"]) for class_def in dimension.classes
+    ]
 
-_SENIORITY_CLASSES = [
-    (0, 2, "Moins de 2 ans"),
-    (2, 5, "2-4 ans"),
-    (5, 10, "5-9 ans"),
-    (10, 999, "10 ans et plus"),
-]
-
-_FIRM_SIZE_DETAILED = [
-    (1, 2, "1 salarie"),
-    (2, 6, "2-5 salaries"),
-    (6, 11, "6-10 salaries"),
-    (11, 21, "11-20 salaries"),
-    (21, 51, "21-50 salaries"),
-    (51, 101, "51-100 salaries"),
-    (101, 201, "101-200 salaries"),
-    (201, 501, "201-500 salaries"),
-    (501, 1001, "501-1000 salaries"),
-    (1001, 1_000_000, "Plus de 1000 salaries"),
-]
-
-_FIRM_SIZE_REDUCED = [
-    (1, 11, "Micro (1-10)"),
-    (11, 51, "Petite (11-50)"),
-    (51, 201, "Moyenne (51-200)"),
-    (201, 1_000_000, "Grande (201+)"),
-]
 
 # Niveaux de la colonne TAG retires au filtre 2/5. Les niveaux 1, 2 et 4 sont
 # conserves : ils signalent une correspondance avec une autre ligne sans que
@@ -113,6 +89,7 @@ _HEURES_PAR_MOIS = 179.2  # 22,4 jours x 8h
 # ---------------------------------------------------------------------------
 # API publique
 # ---------------------------------------------------------------------------
+
 
 def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False) -> str:
     """
@@ -175,7 +152,9 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         )
 
     processed_bucket = cfg.minio.processed_bucket
-    all_objects = list_objects(cfg.minio, processed_bucket, cfg.minio.processed_prefix, recursive=False)
+    all_objects = list_objects(
+        cfg.minio, processed_bucket, cfg.minio.processed_prefix, recursive=False
+    )
     files = sorted(obj for obj in all_objects if re.search(r"\.parquet$", obj))
 
     if not files:
@@ -184,8 +163,12 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         )
 
     # --- 1. Concatenation ---
-    logger.info("[1. Concatenation] Lecture de {} fichiers mensuels depuis {}/{}",
-                len(files), processed_bucket, cfg.minio.processed_prefix)
+    logger.info(
+        "[1. Concatenation] Lecture de {} fichiers mensuels depuis {}/{}",
+        len(files),
+        processed_bucket,
+        cfg.minio.processed_prefix,
+    )
     frames = [read_parquet(cfg.minio, processed_bucket, f) for f in files]
 
     # Aligne les schemas (union des colonnes)
@@ -198,8 +181,12 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         aligned.append(f.select(list(all_cols.keys())))
 
     df = pl.concat(aligned, how="vertical")
-    logger.info("[1. Concatenation] Termine : {} lignes, {} colonnes ({} colonnes uniques sur l'ensemble des fichiers)",
-                df.height, df.width, len(all_cols))
+    logger.info(
+        "[1. Concatenation] Termine : {} lignes, {} colonnes ({} colonnes uniques sur l'ensemble des fichiers)",
+        df.height,
+        df.width,
+        len(all_cols),
+    )
 
     # --- Suivi du volume cumule ---
     # n_brut est le denominateur fixe (volume brut concatene, avant tout
@@ -214,7 +201,10 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         logger.info(
             "[VOLUME CUMULE] Apres {} : {} lignes restantes, soit {:.2f}% du volume brut "
             "initial ({} lignes)",
-            nom, hauteur, pct_brut, n_brut,
+            nom,
+            hauteur,
+            pct_brut,
+            n_brut,
         )
 
     _log_etape("concatenation (etat initial)", df.height)
@@ -227,10 +217,15 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         logger.info(
             "[Filtre 1/5 - Doublons stricts] Lignes strictement identiques (toutes colonnes) : "
             "{} -> {} lignes ({} retirees, {:.2f}% du volume entrant)",
-            n_avant, df.height, n_retire, n_retire / n_avant * 100 if n_avant else 0.0,
+            n_avant,
+            df.height,
+            n_retire,
+            n_retire / n_avant * 100 if n_avant else 0.0,
         )
     else:
-        logger.info("[Filtre 1/5 - Doublons stricts] Desactive (cleaning.remove_duplicates=false), aucune ligne retiree.")
+        logger.info(
+            "[Filtre 1/5 - Doublons stricts] Desactive (cleaning.remove_duplicates=false), aucune ligne retiree."
+        )
     _log_etape("Filtre 1/5 - Doublons stricts", df.height)
 
     # TAG (deja calcule cote source) classe chaque ligne selon un niveau de
@@ -243,9 +238,7 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     if "TAG" in df.columns:
         n_avant = df.height
         tag_counts = df["TAG"].value_counts().sort("count", descending=True)
-        df = df.filter(
-            pl.col("TAG").is_null() | ~pl.col("TAG").is_in(_TAGS_EXCLUS)
-        )
+        df = df.filter(pl.col("TAG").is_null() | ~pl.col("TAG").is_in(_TAGS_EXCLUS))
         n_retire = n_avant - df.height
         logger.info(
             "[Filtre 2/5 - Colonne TAG] Repartition avant filtre : {}",
@@ -254,7 +247,10 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         logger.info(
             "[Filtre 2/5 - Colonne TAG] Niveaux exclus {} (les autres niveaux sont "
             "CONSERVES) : {} -> {} lignes ({} retirees, {:.2f}% du volume entrant)",
-            sorted(_TAGS_EXCLUS), n_avant, df.height, n_retire,
+            sorted(_TAGS_EXCLUS),
+            n_avant,
+            df.height,
+            n_retire,
             n_retire / n_avant * 100 if n_avant else 0.0,
         )
     else:
@@ -271,19 +267,45 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     # plus eleve etant la meilleure approximation disponible du salaire
     # effectivement verse ce mois-la.
     _cols_periode = [c for c in ("PERIOD", "ANNEE", "MOIS") if c in df.columns]
-    if "ID_INDIV" in df.columns and "ID_EMPLOYEUR" in df.columns and _cols_periode and "SALAIRE_BRUT" in df.columns:
+    if (
+        "ID_INDIV" in df.columns
+        and "ID_EMPLOYEUR" in df.columns
+        and _cols_periode
+        and "SALAIRE_BRUT" in df.columns
+    ):
         n_avant = df.height
         cle_dedup = ["ID_INDIV", "ID_EMPLOYEUR", *_cols_periode]
-        df = (
-            df.sort("SALAIRE_BRUT", descending=True, nulls_last=True)
+        df = df.with_row_index("_ORDRE_DEDUP")
+        cle_complete = pl.all_horizontal([pl.col(col_name).is_not_null() for col_name in cle_dedup])
+        incompletes = df.filter(~cle_complete).with_columns(
+            pl.lit(1).cast(pl.Int8).alias("CLE_DEDUP_INCOMPLETE")
+        )
+        completes = (
+            df.filter(cle_complete)
+            .with_columns(pl.lit(0).cast(pl.Int8).alias("CLE_DEDUP_INCOMPLETE"))
+            .sort("SALAIRE_BRUT", descending=True, nulls_last=True)
             .unique(subset=cle_dedup, keep="first", maintain_order=True)
+        )
+        df = (
+            pl.concat([completes, incompletes], how="vertical")
+            .sort("_ORDRE_DEDUP")
+            .drop("_ORDRE_DEDUP")
         )
         n_retire = n_avant - df.height
         logger.info(
             "[Filtre 3/5 - Doublons ID_INDIV+ID_EMPLOYEUR] Cle : {} (meme employeur, salaire le "
             "plus eleve conserve ; cumuls d'emplois chez des employeurs differents non touches) : "
             "{} -> {} lignes ({} retirees, {:.2f}% du volume entrant)",
-            cle_dedup, n_avant, df.height, n_retire, n_retire / n_avant * 100 if n_avant else 0.0,
+            cle_dedup,
+            n_avant,
+            df.height,
+            n_retire,
+            n_retire / n_avant * 100 if n_avant else 0.0,
+        )
+        logger.info(
+            "[Filtre 3/5] {} lignes a cle incomplete conservees sans "
+            "deduplication et marquees CLE_DEDUP_INCOMPLETE=1.",
+            incompletes.height,
         )
     else:
         logger.info(
@@ -292,7 +314,11 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         )
     _log_etape("Filtre 3/5 - Doublons ID_INDIV+ID_EMPLOYEUR", df.height)
 
-    if "TYPE_SALARIE" in df.columns and cfg.cleaning.exclude_employee_types and not include_hj_estimated:
+    if (
+        "TYPE_SALARIE" in df.columns
+        and cfg.cleaning.exclude_employee_types
+        and not include_hj_estimated
+    ):
         n_avant = df.height
         type_counts_avant = df["TYPE_SALARIE"].value_counts().sort("count", descending=True)
         # IMPORTANT : is_in() sur une valeur TYPE_SALARIE null renvoie null (pas
@@ -318,10 +344,17 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
             "CONSERVE : {} -> {} lignes ({} retirees, {:.2f}% du volume entrant). "
             "Attendu : ~1,4% du volume (horaires uniquement, cf. audit) -- un pourcentage "
             "nettement superieur signale que la config exclut plus que les seuls horaires.",
-            cfg.cleaning.exclude_employee_types, n_avant, df.height, n_retire,
+            cfg.cleaning.exclude_employee_types,
+            n_avant,
+            df.height,
+            n_retire,
             n_retire / n_avant * 100 if n_avant else 0.0,
         )
-    elif "TYPE_SALARIE" in df.columns and cfg.cleaning.exclude_employee_types and include_hj_estimated:
+    elif (
+        "TYPE_SALARIE" in df.columns
+        and cfg.cleaning.exclude_employee_types
+        and include_hj_estimated
+    ):
         logger.warning(
             "[Filtre 4/5 - Types d'employes exclus] IGNORE (include_hj_estimated=True) : "
             "les types {} sont CONSERVES, horaires compris. Analyse de sensibilite "
@@ -329,10 +362,23 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
             cfg.cleaning.exclude_employee_types,
         )
     else:
-        logger.info("[Filtre 4/5 - Types d'employes exclus] TYPE_SALARIE absent ou exclude_employee_types vide, filtre ignore.")
+        logger.info(
+            "[Filtre 4/5 - Types d'employes exclus] TYPE_SALARIE absent ou exclude_employee_types vide, filtre ignore."
+        )
     _log_etape("Filtre 4/5 - Types d'employes exclus", df.height)
 
     if "SALAIRE_BRUT" in df.columns:
+        n_periodicite_inconnue = (
+            df.filter(pl.col("TYPE_SALARIE").is_null()).height
+            if "TYPE_SALARIE" in df.columns
+            else df.height
+        )
+        unknown_as_daily = cfg.cleaning.unknown_periodicity_assumption == "daily"
+        logger.info(
+            "Periodicite non renseignee : {} lignes traitees selon l'hypothese '{}'.",
+            n_periodicite_inconnue,
+            cfg.cleaning.unknown_periodicity_assumption,
+        )
         # Seuil de plausibilite du salaire, ventile par periodicite
         # (TYPE_SALARIE) des qu'un type non mensuel subsiste dans les donnees :
         # un taux journalier de quelques milliers de FCFA est parfaitement
@@ -350,14 +396,19 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         # est effectivement present apres le filtre precedent.
         _types_restants = (
             set(df["TYPE_SALARIE"].drop_nulls().unique().to_list())
-            if "TYPE_SALARIE" in df.columns else set()
+            if "TYPE_SALARIE" in df.columns
+            else set()
         )
-        if _types_restants & {"J", "H"}:
+        if (_types_restants & {"J", "H"}) or (unknown_as_daily and n_periodicite_inconnue > 0):
             seuil_journalier = cfg.cleaning.min_salary / _JOURS_OUVRES_PAR_MOIS
             seuil_horaire = cfg.cleaning.min_salary / _HEURES_PAR_MOIS
             seuil_expr = (
-                pl.when(pl.col("TYPE_SALARIE") == "J").then(pl.lit(seuil_journalier))
-                .when(pl.col("TYPE_SALARIE") == "H").then(pl.lit(seuil_horaire))
+                pl.when(pl.col("TYPE_SALARIE") == "J")
+                .then(pl.lit(seuil_journalier))
+                .when(pl.col("TYPE_SALARIE") == "H")
+                .then(pl.lit(seuil_horaire))
+                .when(pl.col("TYPE_SALARIE").is_null() & pl.lit(unknown_as_daily))
+                .then(pl.lit(seuil_journalier))
                 .otherwise(pl.lit(cfg.cleaning.min_salary))
             )
             logger.info(
@@ -365,7 +416,9 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
                 "presents : {}) : Mensuel/autre={:.0f} FCFA, Journalier={:.0f} FCFA/jour, "
                 "Horaire={:.0f} FCFA/h",
                 sorted(_types_restants & {"J", "H"}),
-                cfg.cleaning.min_salary, seuil_journalier, seuil_horaire,
+                cfg.cleaning.min_salary,
+                seuil_journalier,
+                seuil_horaire,
             )
         else:
             seuil_expr = pl.lit(cfg.cleaning.min_salary)
@@ -391,29 +444,47 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         n_sous_seuil = df.filter(
             (pl.col("SALAIRE_BRUT") > 0) & (pl.col("SALAIRE_BRUT") < seuil_expr)
         ).height
+        n_inconnues_exclues = (
+            df.filter(
+                pl.col("TYPE_SALARIE").is_null()
+                & pl.col("SALAIRE_BRUT").is_not_null()
+                & (pl.col("SALAIRE_BRUT") < seuil_expr)
+            ).height
+            if "TYPE_SALARIE" in df.columns
+            else 0
+        )
         logger.info(
             "[Filtre 5/5 - Salaire minimum] Detail des salaires sous seuil a exclure : "
             "{} negatifs + {} nuls (zero) + {} positifs sous le seuil = {} lignes au total",
-            n_negatifs, n_nuls, n_sous_seuil,
+            n_negatifs,
+            n_nuls,
+            n_sous_seuil,
             n_negatifs + n_nuls + n_sous_seuil,
+        )
+        logger.info(
+            "Hypothese periodicite inconnue='{}' : {} lignes inconnues seront "
+            "exclues par le seuil de salaire.",
+            cfg.cleaning.unknown_periodicity_assumption,
+            n_inconnues_exclues,
         )
 
         n_avant = df.height
-        df = df.filter(
-            pl.col("SALAIRE_BRUT").is_null() | (pl.col("SALAIRE_BRUT") >= seuil_expr)
-        )
+        df = df.filter(pl.col("SALAIRE_BRUT").is_null() | (pl.col("SALAIRE_BRUT") >= seuil_expr))
         n_retire = n_avant - df.height
         logger.info(
             "[Filtre 5/5 - Salaire minimum] Salaires sous seuil exclus (negatifs+nuls+sous-seuil, "
             "salaires manquants CONSERVES) : {} -> {} lignes ({} retirees, {:.2f}% du volume entrant)",
-            n_avant, df.height, n_retire, n_retire / n_avant * 100 if n_avant else 0.0,
+            n_avant,
+            df.height,
+            n_retire,
+            n_retire / n_avant * 100 if n_avant else 0.0,
         )
     else:
         logger.info("[Filtre 5/5 - Salaire minimum] SALAIRE_BRUT absent, filtre ignore.")
     _log_etape("Filtre 5/5 - Salaire minimum (fin des filtres de nettoyage)", df.height)
 
     # --- 2. Variables derivees ---
-    ref_date = date.today()
+    df = add_reference_date(df)
 
     # SALAIRE_BRUT_MENS : variable HISTORIQUE, conservee pour compatibilite.
     # Elle n'est plus la reference des etapes aval (voir SALAIRE_BRUT_ESTIME_AU_MOIS
@@ -423,8 +494,11 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     # que l'audit infirme pour les horaires (69% de durees incoherentes).
     if "SALAIRE_BRUT" in df.columns and "DUREE_TRAVAILLEE" in df.columns:
         df = df.with_columns(
-            (pl.col("SALAIRE_BRUT") / pl.col("DUREE_TRAVAILLEE").clip(1, cfg.cleaning.max_duration) * 12)
-            .alias("SALAIRE_BRUT_MENS")
+            (
+                pl.col("SALAIRE_BRUT")
+                / pl.col("DUREE_TRAVAILLEE").clip(1, cfg.cleaning.max_duration)
+                * 12
+            ).alias("SALAIRE_BRUT_MENS")
         )
 
     # --- SALAIRE_BRUT_ESTIME_AU_MOIS ---
@@ -432,10 +506,10 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     # en mois, borne a max_duration=12 -- coherent uniquement pour TYPE_SALARIE
     # == "M"), cette variable estime un equivalent MENSUEL du salaire pour
     # CHAQUE periodicite declaree, en appliquant le taux journalier/horaire
-    # aux jours/heures ouvres standard d'un mois complet (26 jours, 208h) :
+    # aux jours/heures ouvres standard d'un mois complet (22,4 jours, 179,2h) :
     #   - Mensuel (M)    : SALAIRE_BRUT tel quel (deja un montant mensuel).
-    #   - Journalier (J) : SALAIRE_BRUT (taux/jour) x 26 jours ouvres/mois.
-    #   - Horaire (H)    : SALAIRE_BRUT (taux/heure) x 208h/mois (26j x 8h).
+    #   - Journalier (J) : SALAIRE_BRUT (taux/jour) x 22,4 jours ouvres/mois.
+    #   - Horaire (H)    : SALAIRE_BRUT (taux/heure) x 179,2h/mois (22,4j x 8h).
     #   - Autre/absent   : SALAIRE_BRUT tel quel (aucune conversion connue).
     # Memes conventions que audit.py::_check_analyse_salaire (SEUIL_PLAUSIBLE)
     # et le notebook analyse_incoherences_salaires.ipynb (SEUIL_PLAUSIBLE) --
@@ -447,18 +521,31 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
                 .then(pl.col("SALAIRE_BRUT") * _JOURS_OUVRES_PAR_MOIS)
                 .when(pl.col("TYPE_SALARIE") == "H")
                 .then(pl.col("SALAIRE_BRUT") * _HEURES_PAR_MOIS)
+                .when(
+                    pl.col("TYPE_SALARIE").is_null()
+                    & pl.lit(cfg.cleaning.unknown_periodicity_assumption == "daily")
+                )
+                .then(pl.col("SALAIRE_BRUT") * _JOURS_OUVRES_PAR_MOIS)
                 .otherwise(pl.col("SALAIRE_BRUT"))
                 .alias("SALAIRE_BRUT_ESTIME_AU_MOIS")
+            ).with_columns(
+                pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS").alias("SALAIRE_BRUT_ESTIME_AU_MOIS_W")
             )
             n_j = df.filter(pl.col("TYPE_SALARIE") == "J").height
             n_h = df.filter(pl.col("TYPE_SALARIE") == "H").height
             logger.info(
                 "SALAIRE_BRUT_ESTIME_AU_MOIS calcule : Mensuel/autre inchange, "
                 "Journalier x{} ({} lignes), Horaire x{} ({} lignes)",
-                _JOURS_OUVRES_PAR_MOIS, n_j, _HEURES_PAR_MOIS, n_h,
+                _JOURS_OUVRES_PAR_MOIS,
+                n_j,
+                _HEURES_PAR_MOIS,
+                n_h,
             )
         else:
-            df = df.with_columns(pl.col("SALAIRE_BRUT").alias("SALAIRE_BRUT_ESTIME_AU_MOIS"))
+            df = df.with_columns(
+                pl.col("SALAIRE_BRUT").alias("SALAIRE_BRUT_ESTIME_AU_MOIS"),
+                pl.col("SALAIRE_BRUT").alias("SALAIRE_BRUT_ESTIME_AU_MOIS_W"),
+            )
             logger.info(
                 "SALAIRE_BRUT_ESTIME_AU_MOIS = SALAIRE_BRUT (TYPE_SALARIE absent, "
                 "aucune conversion de periodicite possible)."
@@ -476,9 +563,8 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         # le p1 mensuel. On ne supprimait pas des valeurs aberrantes, on en
         # fabriquait.
         #
-        # Sur SALAIRE_BRUT_ESTIME_AU_MOIS, toutes les lignes sont ramenees a la
-        # meme echelle mensuelle : les percentiles ont un sens, et l'ecretage
-        # ne touche que de vraies valeurs extremes.
+        # La colonne suffixee _W est la seule winsorisee. La colonne sans suffixe
+        # conserve chaque valeur observee pour les quantiles, extremes et le Gini.
         #
         # Effet de bord assume : les deux extremites de la distribution sont
         # ecrasees. Les statistiques d'inegalite (Gini, ratios inter-deciles,
@@ -493,15 +579,20 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
             n_bas = df.filter(pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS") < lo).height
             n_haut = df.filter(pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS") > hi).height
             df = df.with_columns(
-                pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS").clip(lo, hi)
-                .alias("SALAIRE_BRUT_ESTIME_AU_MOIS")
+                pl.col("SALAIRE_BRUT_ESTIME_AU_MOIS_W")
+                .clip(lo, hi)
+                .alias("SALAIRE_BRUT_ESTIME_AU_MOIS_W")
             )
             logger.info(
-                "Winsorisation SALAIRE_BRUT_ESTIME_AU_MOIS (apres conversion de "
+                "Winsorisation SALAIRE_BRUT_ESTIME_AU_MOIS_W (apres conversion de "
                 "periodicite) : bornes [{:.0f}, {:.0f}] (p{:.0f}/p{:.0f}), "
                 "{} valeurs ecretees en bas, {} en haut",
-                lo, hi, cfg.cleaning.winsor_lower * 100, cfg.cleaning.winsor_upper * 100,
-                n_bas, n_haut,
+                lo,
+                hi,
+                cfg.cleaning.winsor_lower * 100,
+                cfg.cleaning.winsor_upper * 100,
+                n_bas,
+                n_haut,
             )
         else:
             logger.warning(
@@ -545,37 +636,31 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     # de declaration de l'individu, cf. annexe 3, probabilite q_ijt), jamais
     # comme valeur imputee en amont de l'IPW.
 
-    if "DATE_NAISSANCE" in df.columns:
-        df = df.with_columns(
-            ((pl.lit(ref_date) - pl.col("DATE_NAISSANCE")).dt.total_days() / 365.25)
-            .floor()
-            .cast(pl.Int32, strict=False)
-            .alias("AGE_EMPLOYE")
-        )
-
-    if "DATE_EMBAUCHE" in df.columns:
-        df = df.with_columns(
-            ((pl.lit(ref_date) - pl.col("DATE_EMBAUCHE")).dt.total_days() / 365.25)
-            .floor()
-            .cast(pl.Int32, strict=False)
-            .alias("ANCIENNETE_ENTREPRISE")
-        )
-
-    if "DATE_IMMATRICULATION" in df.columns:
-        df = df.with_columns(
-            ((pl.lit(ref_date) - pl.col("DATE_IMMATRICULATION")).dt.total_days() / 365.25)
-            .floor()
-            .cast(pl.Int32, strict=False)
-            .alias("ANCIENNETE_IMMAT")
-        )
-
-    if "DATE_IMMAT_EMPLOYEUR" in df.columns:
-        df = df.with_columns(
-            ((pl.lit(ref_date) - pl.col("DATE_IMMAT_EMPLOYEUR")).dt.total_days() / 365.25)
-            .floor()
-            .cast(pl.Int32, strict=False)
-            .alias("AGE_ENTREPRISE_IMMAT")
-        )
+    duration_columns = {
+        "DATE_NAISSANCE": "AGE_EMPLOYE",
+        "DATE_EMBAUCHE": "ANCIENNETE_ENTREPRISE",
+        "DATE_IMMATRICULATION": "ANCIENNETE_IMMAT",
+        "DATE_IMMAT_EMPLOYEUR": "AGE_ENTREPRISE_IMMAT",
+    }
+    duration_exprs = []
+    for source_col, output_col in duration_columns.items():
+        if source_col not in df.columns:
+            continue
+        n_future = df.filter(
+            pl.col(source_col).is_not_null()
+            & pl.col("DATE_REFERENCE").is_not_null()
+            & (pl.col(source_col) > pl.col("DATE_REFERENCE"))
+        ).height
+        if n_future:
+            logger.warning(
+                "{} dates de {} posterieures au mois de reference sont masquees dans {}.",
+                n_future,
+                source_col,
+                output_col,
+            )
+        duration_exprs.append(completed_years_expr(source_col, "DATE_REFERENCE").alias(output_col))
+    if duration_exprs:
+        df = df.with_columns(duration_exprs)
 
     if "MOIS" in df.columns:
         df = df.with_columns(
@@ -586,43 +671,57 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     # --- Variables de classification ---
     if "AGE_EMPLOYE" in df.columns:
         df = df.with_columns(
-            _classify("AGE_EMPLOYE", _AGE_CLASSES).alias("CL_AGE_EMPLOYE")
+            _classify("AGE_EMPLOYE", _dimension_breaks(cfg.dimensions, "age_employee")).alias(
+                "CL_AGE_EMPLOYE"
+            )
         )
 
     if "ANCIENNETE_ENTREPRISE" in df.columns:
         df = df.with_columns(
-            _classify("ANCIENNETE_ENTREPRISE", _SENIORITY_CLASSES)
-            .alias("CL_ANCIENNETE_ENTREPRISE")
+            _classify(
+                "ANCIENNETE_ENTREPRISE",
+                _dimension_breaks(cfg.dimensions, "seniority_firm"),
+            ).alias("CL_ANCIENNETE_ENTREPRISE")
         )
 
     if "ANCIENNETE_IMMAT" in df.columns:
         df = df.with_columns(
-            _classify("ANCIENNETE_IMMAT", _SENIORITY_CLASSES)
-            .alias("CL_ANCIENNETE_IMMAT")
+            _classify(
+                "ANCIENNETE_IMMAT",
+                _dimension_breaks(cfg.dimensions, "seniority_registration"),
+            ).alias("CL_ANCIENNETE_IMMAT")
         )
 
     if "AGE_ENTREPRISE_IMMAT" in df.columns:
         df = df.with_columns(
-            _classify("AGE_ENTREPRISE_IMMAT", _SENIORITY_CLASSES)
-            .alias("CL_AGE_ENTREPRISE")
+            _classify("AGE_ENTREPRISE_IMMAT", _dimension_breaks(cfg.dimensions, "firm_age")).alias(
+                "CL_AGE_ENTREPRISE"
+            )
         )
 
     if "EFFECTIF_SALARIES" in df.columns:
         df = df.with_columns(
-            _classify("EFFECTIF_SALARIES", _FIRM_SIZE_DETAILED).alias("CLASSE_EFFECTIF"),
-            _classify("EFFECTIF_SALARIES", _FIRM_SIZE_REDUCED).alias("CLASSE_EFFECTIF_REDUITE"),
+            _classify("EFFECTIF_SALARIES", _dimension_breaks(cfg.dimensions, "firm_size")).alias(
+                "CLASSE_EFFECTIF"
+            ),
+            _classify(
+                "EFFECTIF_SALARIES", _dimension_breaks(cfg.dimensions, "firm_size_reduced")
+            ).alias("CLASSE_EFFECTIF_REDUITE"),
         )
 
     # --- 3. Ecriture ---
     out_object = f"{cfg.minio.cleaned_prefix}cnps_cleaned.parquet"
     write_parquet(cfg.minio, cfg.minio.cleaned_bucket, out_object, df)
-    logger.info("Donnees nettoyees ecrites : {} ({} lignes, {} colonnes)",
-                out_object, df.height, df.width)
+    logger.info(
+        "Donnees nettoyees ecrites : {} ({} lignes, {} colonnes)", out_object, df.height, df.width
+    )
     logger.info(
         "[VOLUME CUMULE - RECAPITULATIF FINAL] {} lignes brutes -> {} lignes en sortie, "
         "soit {:.2f}% du volume brut conserve au total ({:.2f}% retire cumule, tous filtres "
         "confondus).",
-        n_brut, df.height, df.height / n_brut * 100 if n_brut else 0.0,
+        n_brut,
+        df.height,
+        df.height / n_brut * 100 if n_brut else 0.0,
         (n_brut - df.height) / n_brut * 100 if n_brut else 0.0,
     )
 
@@ -640,14 +739,15 @@ if __name__ == "__main__":
     parser.add_argument("--settings", "-s", type=Path, default=None)
     parser.add_argument("--dimensions", "-d", type=Path, default=None)
     parser.add_argument(
-        "--include-hj-estimated", action="store_true",
+        "--include-hj-estimated",
+        action="store_true",
         help="ANALYSE DE SENSIBILITE UNIQUEMENT : n'exclut AUCUN type d'employe, "
-             "horaires compris, en leur calculant SALAIRE_BRUT_ESTIME_AU_MOIS. "
-             "Par defaut (sans ce flag), seuls les types listes dans "
-             "cleaning.exclude_employee_types sont retires -- soit les horaires, "
-             "dont 69%% des lignes ont une DUREE_TRAVAILLEE incoherente. Les "
-             "journaliers sont conserves dans les deux cas. Ne modifie jamais "
-             "settings.yaml : ce choix ne vaut que pour cette execution.",
+        "horaires compris, en leur calculant SALAIRE_BRUT_ESTIME_AU_MOIS. "
+        "Par defaut (sans ce flag), seuls les types listes dans "
+        "cleaning.exclude_employee_types sont retires -- soit les horaires, "
+        "dont 69%% des lignes ont une DUREE_TRAVAILLEE incoherente. Les "
+        "journaliers sont conserves dans les deux cas. Ne modifie jamais "
+        "settings.yaml : ce choix ne vaut que pour cette execution.",
     )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
@@ -663,7 +763,10 @@ if __name__ == "__main__":
     )
     logger.add(
         str(cfg.paths.logs / f"{Path(__file__).stem}.log"),
-        level="DEBUG", rotation="10 MB", retention="30 days", encoding="utf-8",
+        level="DEBUG",
+        rotation="10 MB",
+        retention="30 days",
+        encoding="utf-8",
     )
 
     try:

@@ -1,41 +1,17 @@
 """
-Etape 9/12 — Ponderation finale (IPW / AIPW).
+Etape 9/12 - Ponderation finale IPW a deux etages.
 
-Calcule les poids analytiques finaux en combinant les poids entreprise
-(issus du modele de declaration, etape 7) et les poids individus,
-selon la methode configuree :
+Le poids d'analyse est construit au niveau salarie-employeur-mois :
 
-1. **IPW** (Inverse Probability Weighting) :
-   Ponderation de Horvitz-Thompson standard par les scores de propension.
-   Consistante si le modele de propension est correctement specifie.
+    R_ijt = D_jt * S_ijt
+    W_FINAL_RAW = R_ijt / (P_HAT_JT * Q_HAT_IJT)
 
-2. **AIPW** (Augmented IPW / doublement robuste) :
-   Combine un modele de resultat (imputation, etape 8) avec le modele
-   de propension. Consistante si *au moins un* des deux modeles est
-   correctement specifie (Bang & Robins, 2005).
+Les propensions proviennent des etapes 07 et 07b. L'etape joint elle-meme
+les poids entreprise depuis firm_base, refuse toute cle sans correspondance,
+applique le trimming configure aux seuls poids positifs et conserve le poids
+brut pour la tracabilite. Les non-repondants ont toujours un poids nul.
 
-L'AIPW est la methode recommandee par defaut pour ce pipeline, car elle
-protege contre une mauvaise specification de l'un ou l'autre modele.
-
-Estimateur AIPW de la moyenne
--------------------------------
-mu_AIPW = (1/N) * somme_j [
-    D_j * Y_j / p_j  -  (D_j - p_j) / p_j * m(X_j)
-]
-
-ou :
-- D_j = indicateur de declaration
-- Y_j = resultat observe (salaire)
-- p_j = score de propension estime
-- m(X_j) = resultat estime (salaire impute par le modele d'imputation)
-
-References
-----------
-Robins, J. M., Rotnitzky, A. & Zhao, L. P. (1994). Estimation of regression
-    coefficients when some regressors are not always observed. *JASA*,
-    89(427), 846-866.
-Bang, H. & Robins, J. M. (2005). Doubly robust estimation in missing data
-    and causal inference models. *Biometrics*, 61(4), 962-973.
+Aucune composante d'imputation ou d'augmentation n'entre dans ce calcul.
 """
 
 from __future__ import annotations
@@ -45,75 +21,153 @@ import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig, load_config
+from cnps.response_diagnostics import trim_positive_weights
 from cnps.storage import object_exists, read_parquet, write_parquet
 
 
-def _compute_ipw_weights(
-    p_hat: np.ndarray,
-    d: np.ndarray,
-    trim_lower: float,
-    trim_upper: float,
-) -> np.ndarray:
-    """Calcule des poids IPW stabilises et tronques."""
-    epsilon = 1e-6
-    p_clipped = np.clip(p_hat, epsilon, 1 - epsilon)
+def _join_firm_weights(
+    analytical: pl.DataFrame,
+    firm_base: pl.DataFrame,
+) -> pl.DataFrame:
+    """Joint les poids entreprise en plusieurs-vers-un sans valeur par defaut."""
+    keys = ["ID_EMPLOYEUR", "PERIOD"]
+    required = {*keys, "P_HAT_JT", "W_JT"}
+    missing = sorted(required - set(firm_base.columns))
+    if missing:
+        raise ValueError(
+            "Poids entreprise absents de firm_base: "
+            + ", ".join(missing)
+            + ". Executer l'etape 07."
+        )
+    if firm_base.n_unique(subset=keys) != firm_base.height:
+        raise ValueError("Cle (ID_EMPLOYEUR, PERIOD) non unique dans firm_base.")
 
-    marginal = d.mean()
-    w = np.where(d == 1, marginal / p_clipped, 0.0)
+    before = analytical.height
+    firm_columns = [*keys, "P_HAT_JT", "W_JT"]
+    if "DANS_UNIVERS_RISQUE" in firm_base.columns:
+        firm_columns.append("DANS_UNIVERS_RISQUE")
+    result = analytical.drop(["P_HAT_JT", "W_JT", "DANS_UNIVERS_RISQUE"], strict=False).join(
+        firm_base.select(firm_columns),
+        on=keys,
+        how="left",
+    )
+    if result.height != before:
+        raise ValueError("La jointure des poids entreprise a change la cardinalite.")
+    scope = (
+        pl.col("DANS_UNIVERS_RISQUE") == 1
+        if "DANS_UNIVERS_RISQUE" in result.columns
+        else pl.lit(True)
+    )
+    missing_keys = result.filter(
+        scope & (pl.col("P_HAT_JT").is_null() | pl.col("W_JT").is_null())
+    ).height
+    if missing_keys:
+        raise ValueError(
+            f"{missing_keys} lignes analytiques sans poids entreprise; "
+            "aucun remplissage a 1 n'est autorise."
+        )
+    return result
 
-    nonzero = w[w > 0]
-    if len(nonzero) > 0:
-        lo = np.quantile(nonzero, trim_lower)
-        hi = np.quantile(nonzero, trim_upper)
-        w = np.clip(w, 0, hi)
-        w[w > 0] = np.clip(w[w > 0], lo, hi)
 
-    return w
+def _validate_input_weights(df: pl.DataFrame, cfg: PipelineConfig | None = None) -> None:
+    """Controle les poids entreprise puis, avec la config, les deux etages."""
+    missing = sorted({"P_HAT_JT", "W_JT"} - set(df.columns))
+    if missing:
+        raise ValueError(
+            "Colonnes requises absentes: "
+            + ", ".join(missing)
+            + ". Executer 07_modele_declaration.py avant l'etape 09."
+        )
+
+    p = df["P_HAT_JT"].cast(pl.Float64, strict=False).fill_null(np.nan).to_numpy()
+    w_jt = df["W_JT"].cast(pl.Float64, strict=False).fill_null(np.nan).to_numpy()
+    invalid_p = ~np.isfinite(p) | (p <= 0) | (p >= 1)
+    invalid_w_jt = ~np.isfinite(w_jt) | (w_jt <= 0)
+    if invalid_p.any() or invalid_w_jt.any():
+        raise ValueError(
+            f"P_HAT_JT ou W_JT invalide: P_HAT_JT={invalid_p.sum()}, W_JT={invalid_w_jt.sum()}."
+        )
+
+    if np.unique(w_jt).size == 1:
+        logger.warning(
+            "W_JT est constant ({:.6g}); situation legitime sous MCAR, non bloquante.",
+            w_jt[0],
+        )
+
+    if cfg is None:
+        return
+
+    missing = sorted({"Q_HAT_IJT", "W_INDIV", "D_JT", "S_IJT"} - set(df.columns))
+    if missing:
+        raise ValueError(
+            "Colonnes du second etage absentes: "
+            + ", ".join(missing)
+            + ". Executer 07b_modele_declaration_indiv.py avant l'etape 09."
+        )
+
+    q = df["Q_HAT_IJT"].cast(pl.Float64, strict=False).fill_null(np.nan).to_numpy()
+    w_indiv = df["W_INDIV"].cast(pl.Float64, strict=False).fill_null(np.nan).to_numpy()
+    d = df["D_JT"].to_numpy()
+    s = df["S_IJT"].to_numpy()
+    if not np.isin(d, [0, 1]).all() or not np.isin(s, [0, 1]).all():
+        raise ValueError("D_JT et S_IJT doivent etre binaires et non nuls.")
+    invalid_q = ~np.isfinite(q) | (q <= 0) | ((d == 1) & (q >= 1))
+    invalid_w_indiv = ~np.isfinite(w_indiv) | (w_indiv <= 0)
+    if invalid_q.any() or invalid_w_indiv.any():
+        raise ValueError(
+            "Q_HAT_IJT ou W_INDIV invalide: "
+            f"Q_HAT_IJT={invalid_q.sum()}, W_INDIV={invalid_w_indiv.sum()}."
+        )
+
+    expected_jt = 1.0 / np.clip(p, cfg.modeling.propensity_clip, 1 - cfg.modeling.propensity_clip)
+    expected_indiv = np.where(
+        d == 1,
+        1.0 / np.clip(q, cfg.modeling.propensity_clip, 1 - cfg.modeling.propensity_clip),
+        1.0,
+    )
+    if not np.allclose(w_jt, expected_jt, rtol=1e-10, atol=1e-12):
+        raise ValueError("W_JT ne correspond pas a 1/P_HAT_JT: provenance incoherente.")
+    if not np.allclose(w_indiv, expected_indiv, rtol=1e-10, atol=1e-12):
+        raise ValueError("W_INDIV ne correspond pas a 1/Q_HAT_IJT.")
 
 
-def _compute_aipw_weights(
-    y_obs: np.ndarray,
-    y_imputed: np.ndarray,
-    p_hat: np.ndarray,
-    d: np.ndarray,
-    trim_lower: float,
-    trim_upper: float,
-) -> tuple[np.ndarray, float]:
-    """
-    Calcule les poids AIPW (doublement robustes) et l'estimation ponctuelle AIPW.
+def _compute_two_stage_weights(
+    df: pl.DataFrame,
+    cfg: PipelineConfig,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Calcule R_ijt/(p_jt*q_ijt), puis applique le trimming configure."""
+    scope = (
+        df["DANS_UNIVERS_RISQUE"].fill_null(0).to_numpy() == 1
+        if "DANS_UNIVERS_RISQUE" in df.columns
+        else np.ones(df.height, dtype=bool)
+    )
+    if not scope.any():
+        raise ValueError("Aucune ligne analytique dans l'univers a risque.")
 
-    Returns
-    -------
-    weights : np.ndarray
-        Poids ajustes pour chaque observation.
-    mu_aipw : float
-        Estimation AIPW de la moyenne de population.
-    """
-    epsilon = 1e-6
-    p_clipped = np.clip(p_hat, epsilon, 1 - epsilon)
-
-    ipw_component = d * y_obs / p_clipped
-    augmentation = (d - p_clipped) / p_clipped * y_imputed
-    mu_aipw = float(np.mean(ipw_component - augmentation))
-
-    w_ipw = _compute_ipw_weights(p_hat, d, trim_lower, trim_upper)
-
-    # Facteur d'augmentation pour les unites observees
-    observed_mask = d == 1
-    w_aipw = w_ipw.copy()
-    if observed_mask.any():
-        y_safe = np.where(np.abs(y_obs) > epsilon, y_obs, epsilon)
-        aug_ratio = 1.0 - (1.0 - p_clipped) * y_imputed / y_safe
-        aug_ratio = np.clip(aug_ratio, 0.5, 2.0)  # stabilisation
-        w_aipw[observed_mask] = w_ipw[observed_mask] * aug_ratio[observed_mask]
-
-    nonzero = w_aipw[w_aipw > 0]
-    if len(nonzero) > 0:
-        lo = np.quantile(nonzero, trim_lower)
-        hi = np.quantile(nonzero, trim_upper)
-        w_aipw[w_aipw > 0] = np.clip(w_aipw[w_aipw > 0], lo, hi)
-
-    return w_aipw, mu_aipw
+    d = df["D_JT"].to_numpy().astype(float)[scope]
+    s = df["S_IJT"].to_numpy().astype(float)[scope]
+    p = df["P_HAT_JT"].cast(pl.Float64, strict=False).to_numpy()[scope]
+    q = df["Q_HAT_IJT"].cast(pl.Float64, strict=False).to_numpy()[scope]
+    p_safe = np.clip(p, cfg.modeling.propensity_clip, 1 - cfg.modeling.propensity_clip)
+    q_safe = np.where(
+        d == 1,
+        np.clip(q, cfg.modeling.propensity_clip, 1 - cfg.modeling.propensity_clip),
+        1.0,
+    )
+    response = d * s
+    raw_scope = response / (p_safe * q_safe)
+    trimmed_scope, _ = trim_positive_weights(
+        raw_scope,
+        lower_quantile=cfg.modeling.ipw_trim_lower,
+        upper_quantile=cfg.modeling.ipw_trim_upper,
+        max_trimmed_share=cfg.modeling.max_trimmed_share,
+        label="Poids final a deux etages",
+    )
+    raw = np.zeros(df.height, dtype=float)
+    trimmed = np.zeros(df.height, dtype=float)
+    raw[scope] = raw_scope
+    trimmed[scope] = trimmed_scope
+    return raw, trimmed
 
 
 def calculer_poids_finaux(cfg: PipelineConfig) -> str:
@@ -132,132 +186,75 @@ def calculer_poids_finaux(cfg: PipelineConfig) -> str:
     """
     bucket = cfg.minio.cleaned_bucket
     analytical_object = f"{cfg.minio.cleaned_prefix}analytical_base.parquet"
+    firm_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
 
-    if not object_exists(cfg.minio, bucket, analytical_object):
-        raise FileNotFoundError(f"Base analytique introuvable : {bucket}/{analytical_object}")
+    for object_name, label in (
+        (analytical_object, "base analytique"),
+        (firm_object, "base entreprises"),
+    ):
+        if not object_exists(cfg.minio, bucket, object_name):
+            raise FileNotFoundError(f"{label} introuvable : {bucket}/{object_name}")
 
-    df = read_parquet(cfg.minio, bucket, analytical_object)
-    method = cfg.modeling.estimation_method
+    if cfg.modeling.estimation_method != "ipw":
+        raise ValueError("Seule la methode IPW a deux etages est implementee.")
 
-    logger.info("Calcul des poids finaux avec la methode : {} ({} lignes)", method, df.height)
+    analytical = read_parquet(cfg.minio, bucket, analytical_object)
+    firm = read_parquet(cfg.minio, bucket, firm_object)
+    logger.info(
+        "Calcul IPW a deux etages sur {} lignes analytiques.",
+        analytical.height,
+    )
+    df = _join_firm_weights(analytical, firm)
+    validation_scope = (
+        df.filter(pl.col("DANS_UNIVERS_RISQUE") == 1) if "DANS_UNIVERS_RISQUE" in df.columns else df
+    )
+    _validate_input_weights(validation_scope, cfg)
 
-    if method == "aipw" and "P_HAT_JT" in df.columns:
-        # Meme variable de reference que les etapes 04, 05 et 10 (cf. commentaire
-        # de 05_base_entreprises.py) : SALAIRE_BRUT_ESTIME_AU_MOIS traite chaque
-        # periodicite avec sa propre conversion et ne depend pas de
-        # DUREE_TRAVAILLEE.
-        salary_col = next(
-            (c for c in ("SALAIRE_BRUT_ESTIME_AU_MOIS", "SALAIRE_BRUT_MENS", "SALAIRE_BRUT")
-             if c in df.columns),
-            "SALAIRE_BRUT",
-        )
+    raw_weights, final_weights = _compute_two_stage_weights(df, cfg)
+    df = df.drop(["W_FINAL_RAW", "W_FINAL"], strict=False).with_columns(
+        pl.Series("W_FINAL_RAW", raw_weights),
+        pl.Series("W_FINAL", final_weights),
+    )
 
-        if salary_col in df.columns and "P_HAT_JT" in df.columns:
-            y_obs = df[salary_col].fill_null(0).to_numpy()
-            p_hat = df["P_HAT_JT"].fill_null(0.5).to_numpy()
-            d = df["D_JT"].fill_null(1).to_numpy().astype(float) if "D_JT" in df.columns \
-                else np.ones(len(df))
-
-            # Utilise la moyenne imputee au niveau entreprise comme prediction du modele de resultat
-            y_imputed = df["SALAIRE_MOYEN"].fill_null(
-                df[salary_col].mean()
-            ).to_numpy() if "SALAIRE_MOYEN" in df.columns else y_obs.copy()
-
-            w_aipw, mu_aipw = _compute_aipw_weights(
-                y_obs, y_imputed, p_hat, d,
-                cfg.modeling.ipw_trim_lower, cfg.modeling.ipw_trim_upper,
-            )
-
-            # L'AIPW corrige la non-declaration au niveau ENTREPRISE (p_jt) : il
-            # remplace W_JT, pas W_INDIV. Le second etage de l'annexe 3 (q_ijt,
-            # non-declaration partielle a l'interieur des entreprises
-            # declarantes) reste a appliquer par-dessus, sans quoi la correction
-            # portant sur 65,3% des salaires manquants serait perdue.
-            df = df.with_columns(pl.Series("_W_AIPW", w_aipw))
-            if "W_INDIV" in df.columns:
-                # W_INDIV n'est renseigne que sur le domaine d'estimation (entreprises
-                # declarantes). Hors domaine il vaut null : sans ce fill_null(1.0), la
-                # multiplication propagerait le null et retirerait silencieusement les
-                # salaries des entreprises non declarantes de toutes les statistiques.
-                n_hors_domaine = df["W_INDIV"].null_count()
-                df = df.with_columns(
-                    (pl.col("_W_AIPW") * pl.col("W_INDIV").fill_null(1.0)).alias("W_FINAL")
-                )
-                logger.info(
-                    "AIPW (etage entreprise) compose avec W_INDIV (etage individuel) : "
-                    "W_FINAL = W_AIPW x W_INDIV ({} lignes hors domaine ramenees a "
-                    "W_INDIV=1.0)", n_hors_domaine,
-                )
-            else:
-                df = df.with_columns(pl.col("_W_AIPW").alias("W_FINAL"))
-                logger.warning(
-                    "W_INDIV absent : W_FINAL = W_AIPW seul. Le second etage de "
-                    "l'annexe 3 n'est pas applique (etape 07b executee ?)."
-                )
-            df = df.drop("_W_AIPW")
-            logger.info("Estimation AIPW du salaire moyen : {:.0f} FCFA", mu_aipw)
-        else:
-            logger.warning("Colonnes manquantes pour AIPW, repli sur IPW standard")
-            df = df.with_columns(
-                (pl.col("W_JT").fill_null(1.0)
-                 * pl.col("W_INDIV").fill_null(1.0)).alias("W_FINAL")
-            )
-    else:
-        # --- IPW standard ---
-        df = df.with_columns(
-            (pl.col("W_JT").fill_null(1.0)
-             * pl.col("W_INDIV").fill_null(1.0)).alias("W_FINAL")
-        )
-
-    # Normalisation des poids par strate (periode).
-    # La moyenne d'une periode peut etre nulle (toutes les lignes du groupe a poids
-    # zero) : la division produirait alors des NaN silencieux, qui contaminent
-    # ensuite toute somme ponderee en aval. On neutralise ce cas explicitement.
-    if "PERIOD" in df.columns:
-        n_periodes = df["PERIOD"].n_unique()
-        moyenne_periode = pl.col("W_FINAL").mean().over("PERIOD")
-        df = df.with_columns(
-            pl.when(moyenne_periode > 0)
-            .then(pl.col("W_FINAL") / moyenne_periode)
-            .otherwise(pl.col("W_FINAL"))
-            .alias("W_FINAL")
-        )
-        logger.info("Poids normalises par periode ({} periodes, moyenne=1.0 sur chacune)", n_periodes)
-
-    # Controle d'integrite : un poids null ou non fini retire silencieusement des
-    # lignes de toutes les statistiques ponderees en aval (regles de Rubin,
-    # etapes 10 et 12). L'erreur doit etre bloquante, pas un simple avertissement.
     n_null = df["W_FINAL"].null_count()
-    n_non_fini = int(df.select(
-        (~pl.col("W_FINAL").is_finite() & pl.col("W_FINAL").is_not_null()).sum()
-    ).item())
-    if n_null or n_non_fini:
+    n_non_finite = int(
+        df.select((~pl.col("W_FINAL").is_finite() & pl.col("W_FINAL").is_not_null()).sum()).item()
+    )
+    if n_null or n_non_finite:
         raise ValueError(
-            f"W_FINAL contient {n_null} valeurs nulles et {n_non_fini} valeurs non "
-            f"finies (NaN/inf) sur {df.height} lignes. Ces lignes seraient exclues "
-            f"des statistiques sans avertissement. Verifier que W_JT et W_INDIV sont "
-            f"renseignes sur l'ensemble du panel (etapes 07 et 07b) et que la "
-            f"normalisation par periode ne divise pas par une moyenne nulle."
+            f"W_FINAL contient {n_null} valeurs nulles et {n_non_finite} valeurs non finies."
         )
 
-    # Un poids nul exclut la ligne des statistiques. C'est le comportement attendu
-    # de l'IPW pour les entreprises non declarantes (D_JT = 0) : elles n'ont pas de
-    # salaire observe a porter, la correction passe par la reponderation des
-    # declarantes. On le journalise pour que le volume reste explicite et verifiable.
-    n_zero = int(df.select((pl.col("W_FINAL") == 0).sum()).item())
-    if n_zero:
-        logger.info(
-            "Poids nuls : {} lignes ({:.2f}%) sortent des statistiques ponderees. "
-            "Attendu pour les entreprises non declarantes (D_JT = 0), dont la "
-            "contribution est portee par la reponderation des declarantes.",
-            n_zero, 100.0 * n_zero / df.height,
+    scope = (
+        pl.col("DANS_UNIVERS_RISQUE") == 1 if "DANS_UNIVERS_RISQUE" in df.columns else pl.lit(True)
+    )
+    response = scope & (pl.col("D_JT") == 1) & (pl.col("S_IJT") == 1)
+    nonresponse_with_weight = df.filter(~response & (pl.col("W_FINAL") != 0)).height
+    respondent_without_weight = df.filter(response & (pl.col("W_FINAL") <= 0)).height
+    if nonresponse_with_weight or respondent_without_weight:
+        raise ValueError(
+            "Facteurs de reponse incoherents dans W_FINAL: "
+            f"{nonresponse_with_weight} non-repondants avec poids positif, "
+            f"{respondent_without_weight} repondants sans poids positif."
         )
+
+    n_zero = int(df.select((pl.col("W_FINAL") == 0).sum()).item())
+    logger.info(
+        "Facteur R_ijt=D_JT*S_IJT applique : {} poids nuls ({:.2f}%). "
+        "Aucune normalisation par periode n'est appliquee.",
+        n_zero,
+        100.0 * n_zero / df.height if df.height else 0.0,
+    )
 
     write_parquet(cfg.minio, bucket, analytical_object, df)
     logger.info(
         "Poids finaux calcules : {} lignes -> {} | moyenne={:.3f}, ecart-type={:.3f}, plage=[{:.3f}, {:.3f}]",
-        df.height, analytical_object,
-        df["W_FINAL"].mean(), df["W_FINAL"].std(), df["W_FINAL"].min(), df["W_FINAL"].max(),
+        df.height,
+        analytical_object,
+        df["W_FINAL"].mean(),
+        df["W_FINAL"].std(),
+        df["W_FINAL"].min(),
+        df["W_FINAL"].max(),
     )
 
     return analytical_object
@@ -287,7 +284,10 @@ if __name__ == "__main__":
     )
     logger.add(
         str(cfg.paths.logs / f"{Path(__file__).stem}.log"),
-        level="DEBUG", rotation="10 MB", retention="30 days", encoding="utf-8",
+        level="DEBUG",
+        rotation="10 MB",
+        retention="30 days",
+        encoding="utf-8",
     )
 
     try:

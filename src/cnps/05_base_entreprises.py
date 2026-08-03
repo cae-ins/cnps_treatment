@@ -27,6 +27,7 @@ import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig, load_config
+from cnps.firm_panel import construire_panel_risque
 from cnps.storage import object_exists, read_parquet, write_parquet
 
 
@@ -59,12 +60,12 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
         raise FileNotFoundError(f"Base individus introuvable : {bucket}/{indiv_object}")
 
     df = read_parquet(cfg.minio, bucket, indiv_object)
-    logger.info("Construction de la base entreprises a partir de {} enregistrements individus",
-                df.height)
+    logger.info(
+        "Construction de la base entreprises a partir de {} enregistrements individus", df.height
+    )
 
     # --- Agregation au niveau entreprise-periode ---
-    group_cols = [c for c in ["ID_EMPLOYEUR", "PERIOD", "MOIS", "ANNEE"]
-                  if c in df.columns]
+    group_cols = [c for c in ["ID_EMPLOYEUR", "PERIOD", "MOIS", "ANNEE"] if c in df.columns]
 
     # Variable de salaire de reference, par ordre de preference. Doit rester
     # alignee sur celle de l'etape 04 (calcul de S_IJT) et de l'etape 10
@@ -76,7 +77,13 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
     # chaque periodicite avec sa propre conversion et ne depend pas de
     # DUREE_TRAVAILLEE, incoherente sur 69% des horaires (audit 28/07/2026).
     _salary_candidates = [
-        c for c in ("SALAIRE_BRUT_ESTIME_AU_MOIS", "SALAIRE_BRUT_MENS", "SALAIRE_BRUT")
+        c
+        for c in (
+            "SALAIRE_BRUT_ESTIME_AU_MOIS_W",
+            "SALAIRE_BRUT_ESTIME_AU_MOIS",
+            "SALAIRE_BRUT_MENS",
+            "SALAIRE_BRUT",
+        )
         if c in df.columns
     ]
     salary_col = _salary_candidates[0] if _salary_candidates else "SALAIRE_BRUT"
@@ -85,147 +92,61 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
     agg_exprs = [pl.len().alias("EFFECTIF_OBSERVE")]
 
     if salary_col in df.columns:
-        agg_exprs.extend([
-            pl.col(salary_col).mean().alias("SALAIRE_MOYEN"),
-            pl.col(salary_col).median().alias("SALAIRE_MEDIAN"),
-            pl.col(salary_col).sum().alias("MASSE_SALARIALE"),
-            pl.col(salary_col).std().alias("SALAIRE_SD"),
-            # Effectif dont le salaire est reellement renseigne (et positif).
-            # A distinguer de EFFECTIF_OBSERVE, qui compte les LIGNES presentes
-            # dans le fichier, salaire renseigne ou non : c'est cet ecart qui
-            # caracterise une declaration partielle (cf. annexe 3).
-            (
-                (pl.col(salary_col).is_not_null() & (pl.col(salary_col) > 0))
-                .sum()
-                .cast(pl.Int64)
-                .alias("EFFECTIF_DECLARE")
-            ),
-        ])
+        agg_exprs.extend(
+            [
+                pl.col(salary_col).mean().alias("SALAIRE_MOYEN"),
+                pl.col(salary_col).median().alias("SALAIRE_MEDIAN"),
+                pl.col(salary_col).sum().alias("MASSE_SALARIALE"),
+                pl.col(salary_col).std().alias("SALAIRE_SD"),
+                # Effectif dont le salaire est reellement renseigne (et positif).
+                # A distinguer de EFFECTIF_OBSERVE, qui compte les LIGNES presentes
+                # dans le fichier, salaire renseigne ou non : c'est cet ecart qui
+                # caracterise une declaration partielle (cf. annexe 3).
+                (
+                    (pl.col(salary_col).is_not_null() & (pl.col(salary_col) > 0))
+                    .sum()
+                    .cast(pl.Int64)
+                    .alias("EFFECTIF_DECLARE")
+                ),
+            ]
+        )
 
     if "SEXE" in df.columns:
-        agg_exprs.append(
-            (pl.col("SEXE").cast(pl.Utf8) == "F").mean().alias("PCT_FEMMES")
-        )
+        agg_exprs.append((pl.col("SEXE").cast(pl.Utf8) == "F").mean().alias("PCT_FEMMES"))
 
     if "AGE_EMPLOYE" in df.columns:
         agg_exprs.append(pl.col("AGE_EMPLOYE").mean().alias("AGE_MOYEN"))
 
     if "ANCIENNETE_ENTREPRISE" in df.columns:
-        agg_exprs.append(
-            pl.col("ANCIENNETE_ENTREPRISE").mean().alias("ANCIENNETE_MOYENNE")
-        )
+        agg_exprs.append(pl.col("ANCIENNETE_ENTREPRISE").mean().alias("ANCIENNETE_MOYENNE"))
 
-    # Attributs entreprise reportes tels quels (premiere valeur rencontree)
-    firm_attrs = [c for c in [
-        "SECTEUR_ACTIVITE", "COMMUNE", "CLASSE_EFFECTIF",
-        "CLASSE_EFFECTIF_REDUITE", "AGE_ENTREPRISE_IMMAT", "CL_AGE_ENTREPRISE",
-    ] if c in df.columns]
+    # Valeurs du mois, propagees uniquement vers les mois futurs dans le panel.
+    firm_attrs = [
+        c
+        for c in [
+            "DATE_IMMAT_EMPLOYEUR",
+            "SECTEUR_ACTIVITE",
+            "COMMUNE",
+            "CLASSE_EFFECTIF",
+            "CLASSE_EFFECTIF_REDUITE",
+        ]
+        if c in df.columns
+    ]
 
     for attr in firm_attrs:
-        agg_exprs.append(pl.col(attr).first().alias(attr))
+        agg_exprs.append(pl.col(attr).drop_nulls().last().alias(attr))
     logger.info("Attributs entreprise reportes : {}", firm_attrs)
 
     firm_df = df.group_by(group_cols).agg(agg_exprs)
     logger.info("Agrege en {} enregistrements entreprise-periode", firm_df.height)
 
-    # --- Panel equilibre ---
-    if "ID_EMPLOYEUR" in firm_df.columns and "PERIOD" in firm_df.columns:
-        all_firms = firm_df.select("ID_EMPLOYEUR").unique()
-        all_periods = firm_df.select(
-            [c for c in ["PERIOD", "MOIS", "ANNEE"] if c in firm_df.columns]
-        ).unique()
-        logger.info("Panel cartesien : {} entreprises x {} periodes",
-                     all_firms.height, all_periods.height)
-
-        balanced = all_firms.join(all_periods, how="cross")
-
-        # MOIS/ANNEE existent des deux cotes (deja dans firm_df via group_cols,
-        # et dans balanced via all_periods) : on les retire de firm_df avant la
-        # jointure pour eviter que Polars ne les duplique en MOIS_right/ANNEE_right.
-        join_cols = [c for c in ["ID_EMPLOYEUR", "PERIOD"] if c in firm_df.columns]
-        firm_df = firm_df.drop([c for c in ["MOIS", "ANNEE"] if c in balanced.columns], strict=False)
-        firm_df = balanced.join(firm_df, on=join_cols, how="left")
-
-        # --- Indicateur de declaration D_JT (= p_jt de l'annexe 3) ---
-        #
-        # D_JT = 1 si l'entreprise a transmis AU MOINS UN salaire ce mois-la.
-        #
-        # Attention : ce n'est PAS la simple presence de l'entreprise dans le
-        # fichier. Une entreprise peut y figurer avec 52 salaries et aucun
-        # salaire renseigne : elle n'a alors rien declare, et D_JT doit valoir
-        # 0. Definir D_JT sur EFFECTIF_OBSERVE (un simple comptage de lignes)
-        # ferait estimer au modele de l'etape 07 une probabilite de PRESENCE
-        # dans le fichier, et non de DECLARATION -- les poids 1/p corrigeraient
-        # alors un mecanisme different de celui vise.
-        #
-        # La non-declaration PARTIELLE (l'entreprise declare, mais omet une
-        # partie de ses salaries) n'est volontairement pas traitee ici : elle
-        # releve du second etage q_ijt (etape 07b), conformement a l'annexe 3
-        # ou pi_ijt = p_jt x q_ijt. Utiliser un seuil de completude sur D_JT
-        # melangerait les deux mecanismes.
-        if "EFFECTIF_DECLARE" in firm_df.columns:
-            firm_df = firm_df.with_columns(
-                pl.when(pl.col("EFFECTIF_DECLARE").fill_null(0) > 0)
-                .then(pl.lit(1))
-                .otherwise(pl.lit(0))
-                .cast(pl.Int8)
-                .alias("D_JT")
-            )
-            base_d_jt = "EFFECTIF_DECLARE > 0 (au moins un salaire renseigne)"
-        else:
-            # Repli : sans colonne de salaire exploitable, on retombe sur la
-            # presence dans le fichier (comportement historique).
-            firm_df = firm_df.with_columns(
-                pl.when(pl.col("EFFECTIF_OBSERVE").is_not_null())
-                .then(pl.lit(1))
-                .otherwise(pl.lit(0))
-                .cast(pl.Int8)
-                .alias("D_JT")
-            )
-            base_d_jt = "presence dans le fichier (REPLI : aucune colonne de salaire)"
-            logger.warning(
-                "D_JT calcule sur la seule presence dans le fichier : la colonne de "
-                "salaire est absente, la declaration ne peut pas etre verifiee."
-            )
-
-        n_decl = firm_df.filter(pl.col("D_JT") == 1).height
-        n_non_decl = firm_df.filter(pl.col("D_JT") == 0).height
-        logger.info("D_JT defini sur : {}", base_d_jt)
-        logger.info(
-            "Panel equilibre : {} lignes ({} declarantes, {} non-declarantes, "
-            "soit {:.2f}% de taux de declaration)",
-            firm_df.height, n_decl, n_non_decl,
-            n_decl / firm_df.height * 100 if firm_df.height else 0.0,
-        )
-
-        # Ventilation totale / partielle / complete, pour verifier que D_JT
-        # capte bien ce qu'on attend (memes categories que la feuille
-        # Declaration_Entreprise de l'audit).
-        if "EFFECTIF_DECLARE" in firm_df.columns:
-            ventil = firm_df.with_columns(
-                pl.when(pl.col("EFFECTIF_DECLARE").fill_null(0) == 0)
-                .then(pl.lit("AUCUNE_DECLARATION"))
-                .when(pl.col("EFFECTIF_DECLARE") >= pl.col("EFFECTIF_OBSERVE"))
-                .then(pl.lit("DECLARATION_COMPLETE"))
-                .otherwise(pl.lit("DECLARATION_PARTIELLE"))
-                .alias("_CAT")
-            )
-            for cat, n in (
-                ventil.group_by("_CAT").agg(pl.len().alias("n")).sort("_CAT").iter_rows()
-            ):
-                logger.info(
-                    "  {} : {} couples entreprise-mois ({:.2f}%)",
-                    cat, n, n / firm_df.height * 100 if firm_df.height else 0.0,
-                )
-
-    # --- Poids entreprise initiaux ---
-    firm_df = firm_df.with_columns(pl.lit(1.0).alias("W_JT"))
+    # La fin commune reste celle du panel; K definit seulement la portee.
+    # Aucune absence de declaration n'est interpretee comme une cessation.
+    firm_df = construire_panel_risque(firm_df, cfg)
 
     # --- Log salaire pour la modelisation ---
     if "SALAIRE_MOYEN" in firm_df.columns:
-        firm_df = firm_df.with_columns(
-            pl.col("SALAIRE_MOYEN").log().alias("LOG_SALAIRE_MOYEN")
-        )
+        firm_df = firm_df.with_columns(pl.col("SALAIRE_MOYEN").log().alias("LOG_SALAIRE_MOYEN"))
 
     # --- Variables retardees ---
     if "ID_EMPLOYEUR" in firm_df.columns and "PERIOD" in firm_df.columns:
@@ -234,33 +155,43 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
         for col_name in ["D_JT", "SALAIRE_MOYEN", "EFFECTIF_OBSERVE"]:
             if col_name in firm_df.columns:
                 firm_df = firm_df.with_columns(
-                    pl.col(col_name)
-                    .shift(1)
-                    .over("ID_EMPLOYEUR")
-                    .alias(f"LAG_{col_name}")
+                    pl.col(col_name).shift(1).over("ID_EMPLOYEUR").alias(f"LAG_{col_name}")
                 )
 
-        # Taux de declaration passe (moyenne cumulee de D_JT).
-        # cum_sum / cum_count plutot que cum_mean (Expr.cum_mean n'existe
-        # que dans les versions recentes de Polars ; cum_sum/cum_count
-        # sont disponibles depuis beaucoup plus longtemps).
-        if "D_JT" in firm_df.columns:
-            firm_df = firm_df.with_columns(
-                (
-                    pl.col("D_JT").cast(pl.Float64).cum_sum().over("ID_EMPLOYEUR")
-                    / pl.col("D_JT").cum_count().over("ID_EMPLOYEUR")
-                )
+        # Le taux passe ne compte que les mois appartenant a la portee K.
+        # Les mois anterieurs a la premiere entree dans le champ ne sont pas
+        # interpretes comme des non-reponses.
+        if {"D_JT", "DANS_UNIVERS_RISQUE"} <= set(firm_df.columns):
+            past_sum = (
+                (pl.col("D_JT") * pl.col("DANS_UNIVERS_RISQUE"))
+                .cum_sum()
+                .over("ID_EMPLOYEUR")
                 .shift(1)
                 .over("ID_EMPLOYEUR")
+            )
+            past_count = (
+                pl.col("DANS_UNIVERS_RISQUE")
+                .cum_sum()
+                .over("ID_EMPLOYEUR")
+                .shift(1)
+                .over("ID_EMPLOYEUR")
+            )
+            firm_df = firm_df.with_columns(
+                pl.when(past_count > 0)
+                .then(past_sum / past_count)
+                .otherwise(None)
                 .alias("TAUX_DECLARATION_PASSE")
             )
-        logger.info("Variables retardees ajoutees : LAG_D_JT, LAG_SALAIRE_MOYEN, "
-                    "LAG_EFFECTIF_OBSERVE, TAUX_DECLARATION_PASSE")
+        logger.info(
+            "Variables retardees ajoutees : LAG_D_JT, LAG_SALAIRE_MOYEN, "
+            "LAG_EFFECTIF_OBSERVE, TAUX_DECLARATION_PASSE"
+        )
 
     out_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"
     write_parquet(cfg.minio, bucket, out_object, firm_df)
-    logger.info("Base entreprises : {} lignes, {} colonnes -> {}",
-                firm_df.height, firm_df.width, out_object)
+    logger.info(
+        "Base entreprises : {} lignes, {} colonnes -> {}", firm_df.height, firm_df.width, out_object
+    )
 
     return out_object
 
@@ -289,7 +220,10 @@ if __name__ == "__main__":
     )
     logger.add(
         str(cfg.paths.logs / f"{Path(__file__).stem}.log"),
-        level="DEBUG", rotation="10 MB", retention="30 days", encoding="utf-8",
+        level="DEBUG",
+        rotation="10 MB",
+        retention="30 days",
+        encoding="utf-8",
     )
 
     try:
