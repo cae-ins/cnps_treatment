@@ -1,7 +1,7 @@
 """
 Etape 8/12 — Imputation multiple des salaires manquants.
 
-Lorsqu'une entreprise ne declare pas sur une periode donnee (D_jt = 0),
+Lorsqu'une entreprise ne declare pas sur une periode donnee (R_JT = 0),
 sa distribution de salaires est inobservee. On impute le salaire moyen
 manquant via un modele log-lineaire estime sur les entreprises
 declarantes, puis on genere M jeux de donnees imputes par bootstrap
@@ -66,9 +66,9 @@ def _prepare_imputation_data(
     Returns
     -------
     df_declaring : pl.DataFrame
-        Lignes avec D_JT == 1 et salaire non nul.
+        Lignes avec R_JT == 1 et salaire non nul.
     df_missing : pl.DataFrame
-        Lignes avec D_JT == 0 (salaire a imputer).
+        Lignes avec R_JT == 0 (salaire a imputer).
     cat_feats, num_feats : list[str]
         Covariables disponibles.
     """
@@ -85,11 +85,11 @@ def _prepare_imputation_data(
     # sont exclues de l'ajustement, sinon LinearRegression echoue
     # ("Input y contains infinity").
     df_declaring = df.filter(
-        (pl.col("D_JT") == 1)
+        (pl.col("R_JT") == 1)
         & pl.col("LOG_SALAIRE_MOYEN").is_not_null()
         & pl.col("LOG_SALAIRE_MOYEN").is_finite()
     )
-    df_missing = df.filter(pl.col("D_JT") == 0)
+    df_missing = df.filter(pl.col("R_JT") == 0)
 
     logger.info("Imputation : {} entreprises declarantes, {} non-declarantes",
                 df_declaring.height, df_missing.height)

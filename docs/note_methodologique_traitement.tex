@@ -93,7 +93,7 @@ dix n'indiquent aucun salaire.
 Si ces absences étaient réparties au hasard, il n'y aurait pas de
 difficulté : la moyenne calculée sur les 43\,\% observés serait une
 estimation correcte de la moyenne générale. C'est le raisonnement du
-sondage classique --- interroger 1\,000 personnes tirées au sort renseigne
+sondage classique : interroger 1\,000 personnes tirées au sort renseigne
 sur la population entière.
 
 Mais ces absences ne sont pas aléatoires. Une entreprise qui ne déclare
@@ -104,7 +104,7 @@ des salaires différents de celles qui déclarent scrupuleusement.
 \begin{encadre}{L'analogie du sondage biaisé}
 Supposons que l'on veuille connaître la taille moyenne des habitants d'une
 ville, et que l'on installe le mètre à l'entrée d'un club de basket. On
-obtiendra une moyenne parfaitement calculée --- et parfaitement fausse.
+obtiendra une moyenne parfaitement calculée, et parfaitement fausse.
 L'erreur ne vient pas du calcul mais de \emph{qui a été mesuré}.
 
 Notre situation est analogue : les salaires observés ne sont pas un
@@ -123,7 +123,7 @@ différents.
   ignorer les manquants sans biais.
 
   \item \textbf{Manquant conditionnellement au hasard.} L'absence dépend de
-  caractéristiques que l'on \emph{observe} --- le secteur, la taille de
+  caractéristiques que l'on \emph{observe} : le secteur, la taille de
   l'entreprise, son historique. C'est le cas exploitable : si l'on sait
   \emph{qui} a tendance à ne pas déclarer, on peut corriger.
 
@@ -152,13 +152,13 @@ l'exécution de référence. L'assouplissement du filtre 2, décrit plus bas,
 augmente sensiblement le volume conservé : les chiffres définitifs sont
 ceux du journal d'exécution le plus récent.
 
-\subsection{Filtre 1 --- Les doublons stricts}
+\subsection{Filtre 1 : Les doublons stricts}
 
 Des lignes rigoureusement identiques sur toutes les colonnes apparaissent
 dans les fichiers. Elles traduisent une double saisie et non deux
 emplois. Retrait : \num{421} lignes (0,00\,\%).
 
-\subsection{Filtre 2 --- Les niveaux de doublon signalés à la source}
+\subsection{Filtre 2 : Les niveaux de doublon signalés à la source}
 
 Les fichiers sources portent une colonne de qualité qui signale les
 enregistrements ambigus. La répartition observée est la suivante :
@@ -182,7 +182,7 @@ Les niveaux 1, 2 et 4 sont conservés.
 
 Ce choix mérite d'être explicité, car il a été révisé. Une première
 version du traitement ne retenait que les lignes marquées \emph{unique},
-ce qui revenait à écarter \num{4896489} lignes --- près d'une sur cinq. Or
+ce qui revenait à écarter \num{4896489} lignes, près d'une sur cinq. Or
 un marquage de doublon ne signifie pas nécessairement double compte : deux
 lignes peuvent légitimement correspondre à un cumul d'emplois chez des
 employeurs distincts, ou à une reprise de contrat en cours de mois. Les
@@ -195,18 +195,18 @@ employeur, sur un même mois.
 \begin{retenir}
 \textbf{Principe.} Un signalement produit en amont indique un doute, pas
 un verdict. On ne retire une ligne que sur un critère que l'on peut
-vérifier soi-même --- ici, l'identité du triplet individu / employeur /
+vérifier soi-même : l'identité du triplet individu / employeur /
 mois.
 \end{retenir}
 
-\subsection{Filtre 3 --- Les doublons d'identifiants}
+\subsection{Filtre 3 : Les doublons d'identifiants}
 
 Ce filtre porte l'essentiel de la protection contre les doubles comptes,
 depuis que le filtre précédent a été assoupli.
 
 La règle est vérifiable directement : une même personne ne peut avoir
 qu'une seule déclaration chez un même employeur pour un même mois. Lorsque
-plusieurs lignes correspondent à ce triplet, une seule est retenue --- celle
+plusieurs lignes correspondent à ce triplet, une seule est retenue, celle
 au salaire le plus élevé, les autres étant le plus souvent des saisies
 incomplètes.
 
@@ -214,7 +214,7 @@ Un point mérite attention : ce filtre ne touche \emph{pas} les personnes
 déclarées chez plusieurs employeurs différents. Le cumul d'emplois est une
 réalité, non une erreur, et l'écraser sous-estimerait les revenus.
 
-\subsection{Filtre 4 --- Les travailleurs horaires}
+\subsection{Filtre 4 : Les travailleurs horaires}
 
 Les fichiers distinguent trois périodicités de rémunération : mensuelle,
 journalière, horaire. Le salaire déclaré n'a donc pas la même unité selon
@@ -250,14 +250,14 @@ population réelle sur la foi d'un problème qui ne la concerne pas.
 Le choix de 22,4 mérite un mot. Ce nombre correspond à la moyenne annuelle
 des jours travaillés une fois déduits les dimanches et les jours fériés.
 La convention alternative, 26 jours, suppose un mois travaillé six jours
-sur sept sans interruption --- une hypothèse qui majore mécaniquement les
+sur sept sans interruption, une hypothèse qui majore mécaniquement les
 salaires reconstitués. À 22,4, une rémunération de \num{3000} FCFA par jour
 équivaut à \num{67200} FCFA par mois, contre \num{78000} FCFA avec
 l'ancienne convention.
 
 Ce coefficient sert aussi à définir le seuil de plausibilité applicable aux
 journaliers : le salaire minimum mensuel divisé par 22,4, soit
-\num{3348} FCFA par jour. Les deux usages restent ainsi cohérents --- un
+\num{3348} FCFA par jour. Les deux usages restent ainsi cohérents : un
 journalier payé exactement au seuil atteint exactement le minimum une fois
 converti.
 
@@ -268,12 +268,12 @@ exploitable. Les journaliers, dont les durées sont cohérentes, restent
 dans le champ.
 \end{retenir}
 
-\subsection{Filtre 5 --- Les salaires implausibles}
+\subsection{Filtre 5 : Les salaires implausibles}
 
 Un salaire nul, négatif, ou inférieur au minimum légal traduit une erreur
 de saisie plutôt qu'une rémunération réelle. Le seuil est appliqué
 \emph{par périodicité} : \num{75000} FCFA pour un mensuel, mais
-\num{3348} FCFA pour une journée --- soit le même minimum, exprimé dans
+\num{3348} FCFA pour une journée, soit le même minimum, exprimé dans
 l'unité de la ligne.
 
 Ce détail a son importance. Appliquer le seuil mensuel à un salaire
@@ -293,21 +293,21 @@ Une fois les filtres passés, les salaires journaliers sont multipliés par
 Vient ensuite l'\textbf{écrêtement} des valeurs extrêmes, aussi appelé
 \emph{winsorisation}. Le principe : une poignée de valeurs aberrantes peut
 déplacer une moyenne de façon disproportionnée. Plutôt que de supprimer
-ces lignes --- ce qui perdrait l'information qu'un salaire existe --- on
+ces lignes (ce qui perdrait l'information qu'un salaire existe), on
 ramène les 1\,\% les plus bas et les 1\,\% les plus hauts aux valeurs
 seuils correspondantes.
 
 \begin{encadre}{Pourquoi l'ordre des opérations change tout}
 L'écrêtement était initialement appliqué \emph{avant} la conversion des
 périodicités. Le seuil bas calculé sur ce mélange d'unités valait
-\num{510} FCFA --- une valeur qui n'est ni un salaire mensuel plausible ni
+\num{510} FCFA, une valeur qui n'est ni un salaire mensuel plausible ni
 un taux journalier identifiable. Résultat : le garde-fou ne coupait rien
 du côté des mensuels.
 
 Après correction de l'ordre, le seuil bas s'établit à \num{75000} FCFA et
 le seuil haut à \num{5303714} FCFA. Ce sont des bornes interprétables. On
-observe \textbf{zéro valeur écrêtée en bas} --- signe que les filtres
-précédents ont déjà fait leur travail --- et \num{96290} en haut.
+observe \textbf{zéro valeur écrêtée en bas}, signe que les filtres
+précédents ont déjà fait leur travail, et \num{96290} en haut.
 
 Une opération statistiquement correcte appliquée dans le mauvais ordre
 devient inopérante. Le contrôle ne consiste pas seulement à vérifier
@@ -351,14 +351,14 @@ Déclaration partielle & \num{219071} & 15,2\,\% \\
 \end{tabular}
 \end{center}
 
-Les déclarations partielles représentent 15,2\,\% des couples --- une
+Les déclarations partielles représentent 15,2\,\% des couples, une
 minorité en apparence. Mais ces entreprises sont nettement plus grandes
 que la moyenne. Rapporté aux salariés concernés, le constat change
 d'échelle :
 
 \begin{alerte}{Le chiffre décisif}
-\textbf{65,3\,\% des salaires manquants} --- soit \num{10133921} lignes sur
-\num{15519029} --- se trouvent dans des entreprises qui \emph{ont bien
+\textbf{65,3\,\% des salaires manquants} (soit \num{10133921} lignes sur
+\num{15519029}) se trouvent dans des entreprises qui \emph{ont bien
 déclaré ce mois-là}, mais sans couvrir la totalité de leur effectif.
 
 Une méthode à un seul étage considérerait ces entreprises comme
@@ -429,7 +429,7 @@ qui rend la correction légitime.
 Une précision utile : ces modèles n'utilisent que des informations
 antérieures au mois considéré. Un modèle qui « verrait » le mois courant
 obtiendrait un score parfait sans rien prédire du tout. Un premier
-ajustement donnait d'ailleurs un score de 1,0000 --- signal d'alerte
+ajustement donnait d'ailleurs un score de 1,0000, signal d'alerte
 classique, corrigé depuis.
 
 \subsection{L'imputation des entreprises totalement muettes}
@@ -506,8 +506,8 @@ L'écarter donne des probabilités moins extrêmes. \\[0.3cm]
 \begin{alerte}{Recommandation}
 Ce point doit être arbitré \textbf{avant} diffusion des résultats. En
 l'état, les chiffres par grandes catégories (national, sexe, grands
-secteurs) sont exploitables ; les ventilations fines --- notamment par
-profession, qui compte \num{20656} modalités --- appellent la plus grande
+secteurs) sont exploitables ; les ventilations fines, notamment par
+profession qui compte \num{20656} modalités, appellent la plus grande
 prudence.
 \end{alerte}
 
@@ -521,8 +521,8 @@ catégorie d'entreprise sont absents à 100\,\%. Aucune ventilation selon
 ces axes n'est possible, et ils ne peuvent servir au modèle.
 
 \paragraph{La périodicité inconnue dans 56,9\,\% des cas.} Ces lignes sont
-traitées comme mensuelles par défaut. Cette hypothèse est raisonnable ---
-c'est la modalité dominante parmi les lignes renseignées --- mais elle
+traitées comme mensuelles par défaut. Cette hypothèse est raisonnable
+(c'est la modalité dominante parmi les lignes renseignées), mais elle
 demeure une hypothèse. Si une part significative de ces lignes
 correspondait en réalité à des journaliers, les salaires concernés
 seraient sous-estimés.
@@ -564,7 +564,7 @@ Imputer cinq fois plutôt qu'une
 \begin{retenir}
 Les lignes écartées le sont sur des motifs documentés et chiffrés, chacun
 vérifiable dans le journal d'exécution. Le filtre le plus lourd n'est plus
-le marquage produit en amont --- assoupli au seul niveau 3 --- mais la
+le marquage produit en amont (assoupli au seul niveau 3), mais la
 déduplication sur le triplet individu / employeur / mois, dont la règle
 peut être contrôlée directement sur les données.
 

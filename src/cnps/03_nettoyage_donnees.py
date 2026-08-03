@@ -114,7 +114,7 @@ _HEURES_PAR_MOIS = 179.2  # 22,4 jours x 8h
 # API publique
 # ---------------------------------------------------------------------------
 
-def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False) -> str:
+def nettoyer_donnees(cfg: PipelineConfig, *, include_horaire_estimated: bool = False) -> str:
     """
     Nettoie et enrichit le jeu de donnees concatene.
 
@@ -125,7 +125,7 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
        doublons ID_INDIV+ID_EMPLOYEUR+mois (meme employeur, salaire le plus
        eleve conserve ; les cumuls d'emplois chez des employeurs differents
        ne sont pas touches), types d'employes exclus OU estimation mensuelle
-       (cf. ``include_hj_estimated``), salaire minimum (negatifs/nuls/sous-seuil,
+       (cf. ``include_horaire_estimated``), salaire minimum (negatifs/nuls/sous-seuil,
        cf. commentaire au point d'exclusion)
     3. Calcul des variables derivees (ages, anciennete, classes,
        SALAIRE_BRUT_ESTIME_AU_MOIS)
@@ -136,7 +136,7 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     ----------
     cfg : PipelineConfig
         Configuration du pipeline.
-    include_hj_estimated : bool, optional
+    include_horaire_estimated : bool, optional
         Si False (defaut, **recommande**) : les types listes dans
         ``cfg.cleaning.exclude_employee_types`` sont retires. Cette liste vaut
         desormais ``["H"]`` : seuls les HORAIRES sont exclus, les journaliers
@@ -159,9 +159,9 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     str
         Nom de l'objet Parquet nettoye sur MinIO.
     """
-    if include_hj_estimated:
+    if include_horaire_estimated:
         logger.warning(
-            "Mode periodicites : AUCUN type exclu (include_hj_estimated=True), "
+            "Mode periodicites : AUCUN type exclu (include_horaire_estimated=True), "
             "les HORAIRES sont reintegres alors que l'audit les signale comme "
             "majoritairement ininterpretables (69% de DUREE_TRAVAILLEE "
             "incoherente). Mode d'analyse de sensibilite uniquement -- ne pas "
@@ -321,7 +321,7 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
             cfg.cleaning.exclude_employee_types, n_avant, df.height, n_retire,
             n_retire / n_avant * 100 if n_avant else 0.0,
         )
-    elif "TYPE_SALARIE" in df.columns and cfg.cleaning.exclude_employee_types and include_hj_estimated:
+    elif "TYPE_SALARIE" in df.columns and cfg.cleaning.exclude_employee_types and include_horaire_estimated:
         logger.warning(
             "[Filtre 4/5 - Types d'employes exclus] IGNORE (include_hj_estimated=True) : "
             "les types {} sont CONSERVES, horaires compris. Analyse de sensibilite "
@@ -342,7 +342,7 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
         # journalier paye au seuil atteint exactement le SMIG une fois
         # ramene au mois.
         #
-        # La condition ne peut PAS dependre du seul include_hj_estimated :
+        # La condition ne peut PAS dependre du seul include_horaire_estimated :
         # depuis que exclude_employee_types vaut ["H"] (les journaliers sont
         # conserves par defaut, cf. settings.yaml), des lignes "J" survivent au
         # filtre 4/5 meme en mode par defaut. Les comparer a 75 000 FCFA/jour
@@ -432,10 +432,10 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     # en mois, borne a max_duration=12 -- coherent uniquement pour TYPE_SALARIE
     # == "M"), cette variable estime un equivalent MENSUEL du salaire pour
     # CHAQUE periodicite declaree, en appliquant le taux journalier/horaire
-    # aux jours/heures ouvres standard d'un mois complet (26 jours, 208h) :
+    # aux jours/heures ouvres standard d'un mois complet (22,4 jours, 179.2h) :
     #   - Mensuel (M)    : SALAIRE_BRUT tel quel (deja un montant mensuel).
-    #   - Journalier (J) : SALAIRE_BRUT (taux/jour) x 26 jours ouvres/mois.
-    #   - Horaire (H)    : SALAIRE_BRUT (taux/heure) x 208h/mois (26j x 8h).
+    #   - Journalier (J) : SALAIRE_BRUT (taux/jour) x 22,4 jours ouvres/mois.
+    #   - Horaire (H)    : SALAIRE_BRUT (taux/heure) x 179.2h/mois (22,4 x 8h).
     #   - Autre/absent   : SALAIRE_BRUT tel quel (aucune conversion connue).
     # Memes conventions que audit.py::_check_analyse_salaire (SEUIL_PLAUSIBLE)
     # et le notebook analyse_incoherences_salaires.ipynb (SEUIL_PLAUSIBLE) --
@@ -512,13 +512,13 @@ def nettoyer_donnees(cfg: PipelineConfig, *, include_hj_estimated: bool = False)
     # --- Pas d'imputation par continuite individuelle (retire volontairement) ---
     #
     # Une imputation backward/forward au niveau ID_INDIV
-    # (``SALAIRE_BRUT_IMPUTE_INDIV`` / ``FLAG_IMPUTE_INDIV``) a existe ici puis
-    # a ete retiree, pour rester conforme a la note methodologique de reference
+    # (``SALAIRE_BRUT_IMPUTE_INDIV`` / ``FLAG_IMPUTE_INDIV``) a existé ici puis
+    # a ete retirée, pour rester conforme a la note methodologique de reference
     # (« Estimation du salaire moyen national a partir de donnees incompletes »,
     # annexe 2 « Declaration des salaires par l'employeur » et annexe 3
     # « Declaration employeur partielle »).
     #
-    # Raison : dans les donnees administratives CNPS, l'unite declarante est
+    # Raison : dans les données administratives CNPS, l'unite declarante est
     # l'ENTREPRISE, pas le salarie. Le manquant est donc structurellement situe
     # au niveau entreprise-mois. Combler un trou individuel par report d'un
     # autre mois du meme individu revient a mal specifier le mecanisme de

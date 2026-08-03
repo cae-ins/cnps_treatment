@@ -9,9 +9,9 @@ non-declaration.
 
 Specification du modele
 ------------------------
-P(D_jt = 1 | X_jt) = logit^{-1}(X_jt * beta)
+P(R_JT = 1 | X_jt) = logit^{-1}(X_jt * beta)
 
-ou D_jt est l'indicateur binaire de declaration de l'entreprise j sur la
+ou R_JT est l'indicateur binaire de declaration de l'entreprise j sur la
 periode t, et X_jt comprend :
 - Secteur d'activite
 - Classe de taille d'entreprise
@@ -62,7 +62,7 @@ _CATEGORICAL_FEATURES = [
 ]
 
 _NUMERIC_FEATURES = [
-    "LAG_D_JT",
+    "LAG_R_JT",
     "TAUX_DECLARATION_PASSE",
 ]
 
@@ -77,9 +77,9 @@ def _prepare_features(
     if not cat_feats and not num_feats:
         raise ValueError("Aucune covariable valide trouvee pour le modele de declaration")
 
-    df_model = df.drop_nulls(subset=["D_JT"])
+    df_model = df.drop_nulls(subset=["R_JT"])
     if df_model.height != df.height:
-        logger.info("Lignes sans D_JT exclues de l'ajustement : {} -> {}", df.height, df_model.height)
+        logger.info("Lignes sans R_JT exclues de l'ajustement : {} -> {}", df.height, df_model.height)
 
     # Indicateur d'absence d'historique. A la premiere periode du panel, les
     # variables retardees sont nulles : il n'existe pas de mois anterieur.
@@ -154,7 +154,7 @@ def ajuster_modele_declaration(cfg: PipelineConfig) -> str:
     # --- Preparation des covariables ---
     df_model, cat_feats, num_feats = _prepare_features(df)
 
-    y = df_model["D_JT"].to_numpy().astype(float)
+    y = df_model["R_JT"].to_numpy().astype(float)
 
     # --- Pipeline sklearn ---
     transformers = []

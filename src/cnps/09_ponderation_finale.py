@@ -155,7 +155,7 @@ def calculer_poids_finaux(cfg: PipelineConfig) -> str:
         if salary_col in df.columns and "P_HAT_JT" in df.columns:
             y_obs = df[salary_col].fill_null(0).to_numpy()
             p_hat = df["P_HAT_JT"].fill_null(0.5).to_numpy()
-            d = df["D_JT"].fill_null(1).to_numpy().astype(float) if "D_JT" in df.columns \
+            d = df["R_JT"].fill_null(1).to_numpy().astype(float) if "R_JT" in df.columns \
                 else np.ones(len(df))
 
             # Utilise la moyenne imputee au niveau entreprise comme prediction du modele de resultat
@@ -241,14 +241,14 @@ def calculer_poids_finaux(cfg: PipelineConfig) -> str:
         )
 
     # Un poids nul exclut la ligne des statistiques. C'est le comportement attendu
-    # de l'IPW pour les entreprises non declarantes (D_JT = 0) : elles n'ont pas de
+    # de l'IPW pour les entreprises non declarantes (R_JT = 0) : elles n'ont pas de
     # salaire observe a porter, la correction passe par la reponderation des
     # declarantes. On le journalise pour que le volume reste explicite et verifiable.
     n_zero = int(df.select((pl.col("W_FINAL") == 0).sum()).item())
     if n_zero:
         logger.info(
             "Poids nuls : {} lignes ({:.2f}%) sortent des statistiques ponderees. "
-            "Attendu pour les entreprises non declarantes (D_JT = 0), dont la "
+            "Attendu pour les entreprises non declarantes (R_JT = 0), dont la "
             "contribution est portee par la reponderation des declarantes.",
             n_zero, 100.0 * n_zero / df.height,
         )

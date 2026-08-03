@@ -854,7 +854,7 @@ def _check_declaration_entreprise(
     compte de cette structure hierarchique [...] conduit a des biais »).
 
     Note : ce controle mesure la declaration au niveau du SALAIRE renseigne,
-    ce qui est plus strict que l'indicateur ``D_JT`` de
+    ce qui est plus strict que l'indicateur ``R_JT`` de
     ``05_base_entreprises.py`` — lequel vaut 1 des que l'entreprise apparait
     dans le fichier, sans verifier qu'un salaire y figure.
     """

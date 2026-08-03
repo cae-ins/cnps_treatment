@@ -3,7 +3,7 @@ Etape 5/12 — Construction de la base entreprises.
 
 Agrege les donnees individus (etape 4) au niveau entreprise-periode et
 construit un panel equilibre incluant les entreprises non-declarantes
-(D_jt = 0). Ce panel equilibre est indispensable pour le modele de
+(R_JT = 0). Ce panel equilibre est indispensable pour le modele de
 declaration (etape 7) : il faut observer aussi bien les periodes
 declarees que non-declarees pour estimer le score de propension.
 
@@ -39,7 +39,7 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
     1. Lecture de la base individus
     2. Agregation au niveau entreprise-periode
     3. Construction du panel equilibre (produit cartesien entreprises x periodes)
-    4. Marquage des periodes non-declarees (D_jt = 0)
+    4. Marquage des periodes non-declarees (R_JT = 0)
     5. Ajout des variables retardees pour le modele de declaration
     6. Ecriture de la base entreprises
 
@@ -146,14 +146,14 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
         firm_df = firm_df.drop([c for c in ["MOIS", "ANNEE"] if c in balanced.columns], strict=False)
         firm_df = balanced.join(firm_df, on=join_cols, how="left")
 
-        # --- Indicateur de declaration D_JT (= p_jt de l'annexe 3) ---
+        # --- Indicateur de declaration R_JT (= p_jt de l'annexe 3) ---
         #
-        # D_JT = 1 si l'entreprise a transmis AU MOINS UN salaire ce mois-la.
+        # R_JT = 1 si l'entreprise a transmis AU MOINS UN salaire ce mois-la.
         #
         # Attention : ce n'est PAS la simple presence de l'entreprise dans le
         # fichier. Une entreprise peut y figurer avec 52 salaries et aucun
-        # salaire renseigne : elle n'a alors rien declare, et D_JT doit valoir
-        # 0. Definir D_JT sur EFFECTIF_OBSERVE (un simple comptage de lignes)
+        # salaire renseigne : elle n'a alors rien declare, et R_JT doit valoir
+        # 0. Definir R_JT sur EFFECTIF_OBSERVE (un simple comptage de lignes)
         # ferait estimer au modele de l'etape 07 une probabilite de PRESENCE
         # dans le fichier, et non de DECLARATION -- les poids 1/p corrigeraient
         # alors un mecanisme different de celui vise.
@@ -161,7 +161,7 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
         # La non-declaration PARTIELLE (l'entreprise declare, mais omet une
         # partie de ses salaries) n'est volontairement pas traitee ici : elle
         # releve du second etage q_ijt (etape 07b), conformement a l'annexe 3
-        # ou pi_ijt = p_jt x q_ijt. Utiliser un seuil de completude sur D_JT
+        # ou pi_ijt = p_jt x q_ijt. Utiliser un seuil de completude sur R_JT
         # melangerait les deux mecanismes.
         if "EFFECTIF_DECLARE" in firm_df.columns:
             firm_df = firm_df.with_columns(
@@ -169,9 +169,9 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
                 .then(pl.lit(1))
                 .otherwise(pl.lit(0))
                 .cast(pl.Int8)
-                .alias("D_JT")
+                .alias("R_JT")
             )
-            base_d_jt = "EFFECTIF_DECLARE > 0 (au moins un salaire renseigne)"
+            base_R_JT = "EFFECTIF_DECLARE > 0 (au moins un salaire renseigne)"
         else:
             # Repli : sans colonne de salaire exploitable, on retombe sur la
             # presence dans le fichier (comportement historique).
@@ -180,17 +180,17 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
                 .then(pl.lit(1))
                 .otherwise(pl.lit(0))
                 .cast(pl.Int8)
-                .alias("D_JT")
+                .alias("R_JT")
             )
-            base_d_jt = "presence dans le fichier (REPLI : aucune colonne de salaire)"
+            base_R_JT = "presence dans le fichier (REPLI : aucune colonne de salaire)"
             logger.warning(
-                "D_JT calcule sur la seule presence dans le fichier : la colonne de "
+                "R_JT calcule sur la seule presence dans le fichier : la colonne de "
                 "salaire est absente, la declaration ne peut pas etre verifiee."
             )
 
-        n_decl = firm_df.filter(pl.col("D_JT") == 1).height
-        n_non_decl = firm_df.filter(pl.col("D_JT") == 0).height
-        logger.info("D_JT defini sur : {}", base_d_jt)
+        n_decl = firm_df.filter(pl.col("R_JT") == 1).height
+        n_non_decl = firm_df.filter(pl.col("R_JT") == 0).height
+        logger.info("R_JT defini sur : {}", base_R_JT)
         logger.info(
             "Panel equilibre : {} lignes ({} declarantes, {} non-declarantes, "
             "soit {:.2f}% de taux de declaration)",
@@ -198,7 +198,7 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
             n_decl / firm_df.height * 100 if firm_df.height else 0.0,
         )
 
-        # Ventilation totale / partielle / complete, pour verifier que D_JT
+        # Ventilation totale / partielle / complete, pour verifier que R_JT
         # capte bien ce qu'on attend (memes categories que la feuille
         # Declaration_Entreprise de l'audit).
         if "EFFECTIF_DECLARE" in firm_df.columns:
@@ -231,7 +231,7 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
     if "ID_EMPLOYEUR" in firm_df.columns and "PERIOD" in firm_df.columns:
         firm_df = firm_df.sort(["ID_EMPLOYEUR", "PERIOD"])
 
-        for col_name in ["D_JT", "SALAIRE_MOYEN", "EFFECTIF_OBSERVE"]:
+        for col_name in ["R_JT", "SALAIRE_MOYEN", "EFFECTIF_OBSERVE"]:
             if col_name in firm_df.columns:
                 firm_df = firm_df.with_columns(
                     pl.col(col_name)
@@ -240,21 +240,21 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
                     .alias(f"LAG_{col_name}")
                 )
 
-        # Taux de declaration passe (moyenne cumulee de D_JT).
+        # Taux de declaration passe (moyenne cumulee de R_JT).
         # cum_sum / cum_count plutot que cum_mean (Expr.cum_mean n'existe
         # que dans les versions recentes de Polars ; cum_sum/cum_count
         # sont disponibles depuis beaucoup plus longtemps).
-        if "D_JT" in firm_df.columns:
+        if "R_JT" in firm_df.columns:
             firm_df = firm_df.with_columns(
                 (
-                    pl.col("D_JT").cast(pl.Float64).cum_sum().over("ID_EMPLOYEUR")
-                    / pl.col("D_JT").cum_count().over("ID_EMPLOYEUR")
+                    pl.col("R_JT").cast(pl.Float64).cum_sum().over("ID_EMPLOYEUR")
+                    / pl.col("R_JT").cum_count().over("ID_EMPLOYEUR")
                 )
                 .shift(1)
                 .over("ID_EMPLOYEUR")
                 .alias("TAUX_DECLARATION_PASSE")
             )
-        logger.info("Variables retardees ajoutees : LAG_D_JT, LAG_SALAIRE_MOYEN, "
+        logger.info("Variables retardees ajoutees : LAG_R_JT, LAG_SALAIRE_MOYEN, "
                     "LAG_EFFECTIF_OBSERVE, TAUX_DECLARATION_PASSE")
 
     out_object = f"{cfg.minio.cleaned_prefix}firm_base.parquet"

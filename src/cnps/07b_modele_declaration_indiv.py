@@ -29,7 +29,7 @@ observes chez ces memes employeurs, aux memes mois.
 Domaine d'estimation
 --------------------
 Le modele est ajuste **uniquement sur les salaries des entreprises
-declarantes** (``D_JT = 1``). Pour les autres, ``q_ijt`` n'est pas defini :
+declarantes** (``R_JT = 1``). Pour les autres, ``q_ijt`` n'est pas defini :
 il n'y a rien a observer a l'interieur d'une entreprise qui n'a rien
 transmis. Ces lignes gardent ``W_INDIV = 1.0`` et sont prises en charge par
 ``W_JT`` (etape 07) et l'imputation au niveau entreprise (etape 08),
@@ -213,9 +213,9 @@ def ajuster_modele_declaration_indiv(cfg: PipelineConfig) -> str:
 
     Etapes
     ------
-    1. Lecture de la base analytique (individus + attributs entreprise, dont D_JT)
+    1. Lecture de la base analytique (individus + attributs entreprise, dont R_JT)
     2. Calcul de l'historique de declaration individuelle
-    3. Restriction aux entreprises declarantes (D_JT = 1)
+    3. Restriction aux entreprises declarantes (R_JT = 1)
     4. Ajustement d'une regression logistique sur S_IJT
     5. Poids stabilises W_INDIV = q_moyen / q_hat, tronques
     6. W_INDIV = 1.0 pour les salaries des entreprises non declarantes
@@ -276,22 +276,22 @@ def ajuster_modele_declaration_indiv(cfg: PipelineConfig) -> str:
         raise ValueError(
             "Colonne S_IJT absente : l'etape 04 doit la calculer avant cette etape."
         )
-    if "D_JT" not in df.columns:
+    if "R_JT" not in df.columns:
         raise ValueError(
-            "Colonne D_JT absente : l'etape 05 doit la calculer avant cette etape."
+            "Colonne R_JT absente : l'etape 05 doit la calculer avant cette etape."
         )
 
     df = _ajouter_historique_individuel(df)
 
     # --- Domaine d'estimation : entreprises declarantes uniquement ---
-    # q_ijt est conditionnel a D_JT = 1. Estimer le modele sur l'ensemble des
+    # q_ijt est conditionnel a R_JT = 1. Estimer le modele sur l'ensemble des
     # lignes melangerait deux mecanismes distincts (l'entreprise ne declare
     # pas / elle declare mais omet ce salarie) et biaiserait les deux.
-    declarantes = df.filter(pl.col("D_JT") == 1)
+    declarantes = df.filter(pl.col("R_JT") == 1)
     n_hors_domaine = df.height - declarantes.height
     logger.info(
         "Domaine d'estimation : {} lignes en entreprises declarantes, "
-        "{} lignes hors domaine (D_JT = 0, W_INDIV restera a 1.0)",
+        "{} lignes hors domaine (R_JT = 0, W_INDIV restera a 1.0)",
         declarantes.height, n_hors_domaine,
     )
 
@@ -395,7 +395,7 @@ def ajuster_modele_declaration_indiv(cfg: PipelineConfig) -> str:
         how="left",
     )
 
-    # Hors domaine (D_JT = 0) : W_INDIV = 1.0, la correction est portee par W_JT
+    # Hors domaine (R_JT = 0) : W_INDIV = 1.0, la correction est portee par W_JT
     # et l'imputation entreprise de l'etape 08.
     df = df.with_columns(
         pl.col("_W_INDIV_NEW").fill_null(1.0).alias("W_INDIV")
