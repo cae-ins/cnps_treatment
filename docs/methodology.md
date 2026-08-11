@@ -55,13 +55,17 @@ D_jt = 1 si EFFECTIF_DECLARE > 0, sinon 0
 
 ### 3.2 Bornes du panel
 
-La borne gauche est le mois d'immatriculation de l'employeur, ou sa première apparition si la date manque. Une troncature au début du panel et l'imputation de cette borne sont marquées séparément.
+La borne gauche est le **plus tôt** entre le mois d'immatriculation de l'employeur et son premier mois de déclaration observé ; à défaut de date d'immatriculation, la première apparition. Une déclaration observée prouve l'existence de l'entreprise : elle ne peut pas être écartée du panel par une date d'immatriculation qui la dirait postérieure. Ces employeurs sont marqués `DECLARATION_AVANT_IMMAT` et dénombrés dans les journaux. La date d'immatriculation est lue sur le premier mois où elle est renseignée, et non sur le premier mois observé. Une troncature au début du panel et l'imputation de cette borne sont marquées séparément.
+
+Le panel couvre par construction 100 % des couples (employeur, mois) observés ; un écart interrompt l'étape 05.
 
 Aucune cessation n'est inférée de la dernière déclaration. Faute de registre de radiation, chaque entreprise est prolongée jusqu'à la fin commune du panel. Les journaux distinguent troncatures gauches, débuts imputés, cessations observées (zéro en l'absence de registre) et fins censurées.
 
 ### 3.3 Fenêtre glissante
 
 Pour le mois `t`, `DANS_UNIVERS_RISQUE=1` si l'employeur a déclaré au moins une fois pendant les `K` mois **strictement antérieurs**. La valeur par défaut est `K=12`; `inf` conserve toutes les périodes postérieures à une déclaration passée. Le mois courant n'entre jamais dans la définition du champ, car cela ferait dépendre l'univers de la cible à prédire.
+
+`FENETRE_RISQUE_EXTENSIBLE` signale les mois où moins de `K` mois d'historique sont disponibles. L'ancienneté se mesure depuis l'entrée de l'employeur dans le panel, et non depuis le début commun : une entreprise entrée tardivement a bien un historique tronqué, quelle que soit la profondeur du panel.
 
 L'amorce, où moins de `K` mois antérieurs existent, est marquée `FENETRE_RISQUE_EXTENSIBLE`. Avant diffusion, les indicateurs centraux doivent être rejoués pour `K ∈ {6, 12, 24, inf}`.
 

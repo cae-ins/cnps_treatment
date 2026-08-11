@@ -113,6 +113,86 @@ def test_risk_window_uses_only_strictly_prior_months_and_asof_attributes() -> No
     assert e.filter(pl.col("PERIOD") == "2024-03")["SECTEUR_ACTIVITE"].item() == "B"
 
 
+def test_panel_keeps_declarations_anterior_to_the_registration_date() -> None:
+    """Une declaration observee prouve l'existence: elle ne peut pas etre perdue."""
+    cfg = replace(CFG, modeling=replace(CFG.modeling, risk_window_months=2))
+    observed = pl.DataFrame(
+        {
+            "ID_EMPLOYEUR": ["E", "E", "E", "F", "F"],
+            "PERIOD": ["2024-01", "2024-02", "2024-03", "2024-02", "2024-03"],
+            "ANNEE": [2024] * 5,
+            "MOIS": [1, 2, 3, 2, 3],
+            "EFFECTIF_DECLARE": [1, 1, 1, 1, 1],
+            "SALAIRE_MOYEN": [100_000.0] * 5,
+            # E est immatriculee apres toutes ses declarations, F est coherente.
+            "DATE_IMMAT_EMPLOYEUR": [date(2024, 6, 1)] * 3 + [date(2024, 2, 15)] * 2,
+        }
+    )
+    panel = firm_panel.construire_panel_risque(observed, cfg)
+
+    orphelins = observed.select(["ID_EMPLOYEUR", "PERIOD"]).join(
+        panel.select(["ID_EMPLOYEUR", "PERIOD"]),
+        on=["ID_EMPLOYEUR", "PERIOD"],
+        how="anti",
+    )
+    assert orphelins.height == 0
+
+    e = panel.filter(pl.col("ID_EMPLOYEUR") == "E")
+    f = panel.filter(pl.col("ID_EMPLOYEUR") == "F")
+    assert e["DECLARATION_AVANT_IMMAT"].unique().to_list() == [1]
+    assert f["DECLARATION_AVANT_IMMAT"].unique().to_list() == [0]
+    assert e["PERIOD"].min() == "2024-01"
+    # F n'existe qu'a partir de fevrier: aucun mois fictif n'est cree en janvier.
+    assert f["PERIOD"].min() == "2024-02"
+    assert panel["DEBUT_ACTIVITE_IMPUTE"].sum() == 0
+    assert panel["TRONCATURE_GAUCHE"].sum() == 0
+
+
+def test_registration_date_is_read_beyond_the_first_observed_month() -> None:
+    """Une date absente le premier mois ne doit pas faire imputer le debut."""
+    cfg = replace(CFG, modeling=replace(CFG.modeling, risk_window_months=2))
+    observed = pl.DataFrame(
+        {
+            "ID_EMPLOYEUR": ["E", "E", "G"],
+            "PERIOD": ["2024-02", "2024-03", "2024-01"],
+            "ANNEE": [2024] * 3,
+            "MOIS": [2, 3, 1],
+            "EFFECTIF_DECLARE": [1, 1, 1],
+            "SALAIRE_MOYEN": [100_000.0] * 3,
+            "DATE_IMMAT_EMPLOYEUR": [None, date(2024, 2, 10), date(2024, 1, 5)],
+        }
+    )
+    panel = firm_panel.construire_panel_risque(observed, cfg)
+
+    e = panel.filter(pl.col("ID_EMPLOYEUR") == "E")
+    assert e["DEBUT_ACTIVITE_IMPUTE"].unique().to_list() == [0]
+    assert e["DECLARATION_AVANT_IMMAT"].unique().to_list() == [0]
+    assert e["PERIOD"].min() == "2024-02"
+
+
+def test_extensible_window_is_measured_from_the_firm_entry() -> None:
+    """Le flag d'amorce se mesure depuis DEBUT_INDEX, pas depuis le debut commun."""
+    cfg = replace(CFG, modeling=replace(CFG.modeling, risk_window_months=3))
+    observed = pl.DataFrame(
+        {
+            "ID_EMPLOYEUR": ["A", "H", "H", "H"],
+            "PERIOD": ["2024-01", "2024-03", "2024-04", "2024-05"],
+            "ANNEE": [2024] * 4,
+            "MOIS": [1, 3, 4, 5],
+            "EFFECTIF_DECLARE": [1, 1, 1, 1],
+            "SALAIRE_MOYEN": [100_000.0] * 4,
+            "DATE_IMMAT_EMPLOYEUR": [date(2024, 1, 5)] + [date(2024, 3, 1)] * 3,
+        }
+    )
+    panel = firm_panel.construire_panel_risque(observed, cfg)
+
+    h = panel.filter(pl.col("ID_EMPLOYEUR") == "H").sort("PERIOD")
+    assert h["PERIOD"].to_list() == ["2024-03", "2024-04", "2024-05"]
+    # H entre deux mois apres le debut commun: ses deux premiers mois restent
+    # en fenetre extensible, le troisieme dispose de K=3 mois d'historique.
+    assert h["FENETRE_RISQUE_EXTENSIBLE"].to_list() == [1, 1, 0]
+
+
 def test_individual_history_respects_calendar_gaps_and_employer_pairs() -> None:
     source = pl.DataFrame(
         {

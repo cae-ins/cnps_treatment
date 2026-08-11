@@ -96,7 +96,9 @@ def construire_panel_risque(
         .group_by("ID_EMPLOYEUR", maintain_order=True)
         .agg(
             pl.col("PERIOD_INDEX").first().alias("PREMIERE_APPARITION_INDEX"),
-            pl.col("DATE_IMMAT_EMPLOYEUR").first().alias("_IMMAT_PREMIERE")
+            # drop_nulls: la date peut manquer sur le premier mois observe et etre
+            # renseignee ensuite; la ignorer imputerait un debut d'activite a tort.
+            pl.col("DATE_IMMAT_EMPLOYEUR").drop_nulls().first().alias("_IMMAT_PREMIERE")
             if "DATE_IMMAT_EMPLOYEUR" in observed.columns
             else pl.lit(None).cast(pl.Date).alias("_IMMAT_PREMIERE"),
         )
@@ -107,8 +109,18 @@ def construire_panel_risque(
             )
             .otherwise(pl.col("PREMIERE_APPARITION_INDEX"))
             .cast(pl.Int32)
-            .alias("_DEBUT_INDEX_BRUT"),
+            .alias("_IMMAT_INDEX"),
             pl.col("_IMMAT_PREMIERE").is_null().cast(pl.Int8).alias("DEBUT_ACTIVITE_IMPUTE"),
+        )
+        .with_columns(
+            # Une declaration observee prouve l'existence de l'entreprise: elle ne
+            # peut pas etre effacee par une immatriculation qui la dit posterieure.
+            pl.min_horizontal("_IMMAT_INDEX", "PREMIERE_APPARITION_INDEX").alias(
+                "_DEBUT_INDEX_BRUT"
+            ),
+            (pl.col("_IMMAT_INDEX") > pl.col("PREMIERE_APPARITION_INDEX"))
+            .cast(pl.Int8)
+            .alias("DECLARATION_AVANT_IMMAT"),
         )
         .with_columns(
             pl.col("_DEBUT_INDEX_BRUT").clip(panel_start, panel_end).alias("DEBUT_INDEX"),
@@ -121,6 +133,7 @@ def construire_panel_risque(
         "DEBUT_INDEX",
         "DEBUT_ACTIVITE_IMPUTE",
         "TRONCATURE_GAUCHE",
+        "DECLARATION_AVANT_IMMAT",
     )
     panel = (
         firms.join(periods, how="cross")
@@ -135,6 +148,17 @@ def construire_panel_risque(
         )
         .sort(["ID_EMPLOYEUR", "PERIOD_INDEX"])
     )
+
+    # Le squelette est borne a gauche AVANT d'accrocher l'observe: toute ligne
+    # observee anterieure a DEBUT_INDEX serait perdue sans bruit. L'invariant
+    # doit casser ici, a l'etape 05, et non trois etapes plus loin.
+    n_source = int(panel["_LIGNE_SOURCE"].sum())
+    if n_source != observed.height:
+        raise ValueError(
+            f"Le panel ne couvre pas toutes les lignes observees: "
+            f"{observed.height - n_source} couples (ID_EMPLOYEUR, PERIOD) perdus "
+            f"a l'expansion sur {observed.height}."
+        )
 
     if "EFFECTIF_DECLARE" not in panel.columns:
         raise ValueError("EFFECTIF_DECLARE absent: D_JT ne peut pas etre defini de facon fiable.")
@@ -166,7 +190,9 @@ def construire_panel_risque(
         recent_response = (
             past_response.rolling_sum(window_size=k, min_samples=1).over("ID_EMPLOYEUR") > 0
         )
-        extensible = pl.col("PERIOD_INDEX") - panel_start + 1 < k
+        # Mesure depuis l'entree de l'entreprise dans le panel, pas depuis le
+        # debut commun: une firme entrant tard a bien un historique tronque.
+        extensible = pl.col("PERIOD_INDEX") - pl.col("DEBUT_INDEX") + 1 < k
         k_label = str(k)
 
     panel = panel.with_columns(
@@ -210,12 +236,18 @@ def construire_panel_risque(
         panel.height,
         n_outside,
     )
+    n_avant_immat = int(first_rows["DECLARATION_AVANT_IMMAT"].sum())
     logger.info(
         "Bornes du panel : {} troncatures gauches, {} debuts imputes sur la "
         "premiere apparition, 0 cessations observees, {} fins censurees.",
         n_left,
         n_imputed,
         firms.height,
+    )
+    logger.info(
+        "Borne gauche : {} entreprises declarent avant leur date d'immatriculation; "
+        "le panel demarre a la premiere declaration observee pour celles-ci.",
+        n_avant_immat,
     )
     if k is not None:
         n_extensible = int(panel["FENETRE_RISQUE_EXTENSIBLE"].sum())

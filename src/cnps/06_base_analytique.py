@@ -71,12 +71,14 @@ def construire_base_analytique(cfg: PipelineConfig) -> str:
             f"{join_on} : {duplicate_firms} cles dupliquees."
         )
 
+    analytical = indiv.join(firm_subset, on=join_on, how="left")
+    # firm_value_cols porte aussi les deux cles de jointure, deja presentes cote
+    # individus: les compter surestimerait de 2 le nombre de colonnes ajoutees.
     logger.info(
         "Jointure sur {} : {} colonnes entreprise ajoutees",
         join_on,
-        len(firm_value_cols),
+        analytical.width - indiv.width,
     )
-    analytical = indiv.join(firm_subset, on=join_on, how="left")
     if analytical.height != indiv.height:
         raise AssertionError(
             "Invariant de cardinalite viole pendant la jointure analytique : "

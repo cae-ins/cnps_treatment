@@ -46,13 +46,26 @@ def _join_firm_weights(
     firm_columns = [*keys, "P_HAT_JT", "W_JT"]
     if "DANS_UNIVERS_RISQUE" in firm_base.columns:
         firm_columns.append("DANS_UNIVERS_RISQUE")
+    firm_weights = firm_base.select(firm_columns).with_columns(
+        pl.lit(1).cast(pl.Int8).alias("_APPARIE_FIRM")
+    )
     result = analytical.drop(["P_HAT_JT", "W_JT", "DANS_UNIVERS_RISQUE"], strict=False).join(
-        firm_base.select(firm_columns),
+        firm_weights,
         on=keys,
         how="left",
     )
     if result.height != before:
         raise ValueError("La jointure des poids entreprise a change la cardinalite.")
+    # Un non-appariement n'est pas un hors-univers. Sans ce controle, la portee
+    # ci-dessous l'ignore (DANS_UNIVERS_RISQUE y est null, donc filtre) et le
+    # poids tombe silencieusement a zero au fill_null de _compute_two_stage_weights.
+    unmatched = result.filter(pl.col("_APPARIE_FIRM").is_null()).height
+    if unmatched:
+        raise ValueError(
+            f"{unmatched} lignes analytiques sans correspondance dans firm_base; "
+            "rejouer l'etape 05."
+        )
+    result = result.drop("_APPARIE_FIRM")
     scope = (
         pl.col("DANS_UNIVERS_RISQUE") == 1
         if "DANS_UNIVERS_RISQUE" in result.columns

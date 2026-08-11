@@ -304,16 +304,22 @@ pas. La version 1 proposait de borner à droite par la dernière apparition : **
 grave**. Une dernière apparition précoce peut être une longue non-réponse terminale — précisément le
 `D_JT = 0` que le modèle doit expliquer. La supprimer reviendrait à effacer le phénomène étudié.
 
-- **début** : mois d'immatriculation employeur (`DATE_IMMAT_EMPLOYEUR`, présente dans les données
-  nettoyées mais non transportée aujourd'hui dans les attributs entreprise, `05:119`) ; à défaut,
-  première apparition, avec un indicateur de début imputé ;
+- **début** : le **plus tôt** entre le mois d'immatriculation employeur (`DATE_IMMAT_EMPLOYEUR`,
+  présente dans les données nettoyées mais non transportée aujourd'hui dans les attributs
+  entreprise, `05:119`) et le premier mois de déclaration observé ; à défaut de date, première
+  apparition, avec un indicateur de début imputé. Borner sur la seule date d'immatriculation
+  supprimerait du panel des mois réellement déclarés lorsque cette date est postérieure aux
+  déclarations — cas avéré dans les données et corrigé après coup (cf.
+  `rapport_correction_panel_entreprise.md`) ;
 - **fin** : mois de cessation issu d'un **registre explicite** ; à défaut, fin du panel pour toutes
   les entreprises ;
 - **ne jamais inférer une cessation de la dernière déclaration** ;
 - journaliser séparément troncature gauche, cessations observées et fins censurées.
 
-**Critère d'acceptation** : aucune ligne ne précède l'immatriculation ; aucune entreprise n'est
-tronquée à droite sans source de cessation ; les trois décomptes apparaissent dans les logs.
+**Critère d'acceptation** : aucune ligne du panel ne précède le plus tôt de l'immatriculation et
+de la première déclaration observée ; le panel couvre 100 % des couples (employeur, mois)
+observés ; aucune entreprise n'est tronquée à droite sans source de cessation ; les trois
+décomptes apparaissent dans les logs.
 
 ### Lot C.2 — Covariables *as-of*, sans information future
 **Fichier** : `05_base_entreprises.py`
