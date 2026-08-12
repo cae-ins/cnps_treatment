@@ -208,9 +208,9 @@ Les acquis de l'audit sont conservés. Ce correctif n'est **pas** un retour à l
 
 ## 5. Effet chiffré
 
-Les tests hors ligne sont passés localement : **74 tests, 0 échec**, `ruff check` propre. Les
-trois nouveaux tests échouent bien sur le code d'origine — vérifié en restaurant
-temporairement `firm_panel.py` depuis `HEAD` — ce qui confirme qu'ils verrouillent le défaut.
+Les tests hors ligne sont passés localement : **77 tests, 0 échec**, `ruff check` propre. Les
+tests de non-régression des lots C.2 et C.3 verrouillent respectivement la borne du panel, la
+temporalité des attributs, leur complément sans écrasement et le déterminisme de l'agrégation.
 
 Les chiffres sur données réelles nécessitent un run depuis MinIO. **À compléter après
 exécution** de `python run.py run --from BASE_ENTREPRISES --to EXPORT_EXCEL` :
@@ -225,6 +225,9 @@ exécution** de `python run.py run --from BASE_ENTREPRISES --to EXPORT_EXCEL` :
 | Pente de calibration | 1,0004 | *à mesurer* |
 | Bornes de propension | [0,0453 ; 0,9939] | *à mesurer* |
 | Étape 07b | ERROR à 212 s | *attendu : OK* |
+| Valeurs complétées, par attribut (étape 06) | non mesuré | *à relever dans les logs* |
+| Entreprises-mois à modalités divergentes (étape 05) | non mesuré | *à relever dans les logs* |
+| Part de « Non renseigné », par dimension | non mesuré | *à comparer au run précédent* |
 
 Diagnostic de couverture à rejouer après le run — il doit retourner zéro ligne :
 
@@ -237,17 +240,16 @@ manquants = (
 
 ---
 
-## 6. Reste à arbitrer
+## 6. Arbitrage retenu — lot C.3
 
-**`06_base_analytique.py:56`** — le filtre `c not in indiv_cols` écarte de la base analytique les
-attributs entreprise *as-of* calculés par le lot C.2 (`SECTEUR_ACTIVITE`, `COMMUNE`,
-`CLASSE_EFFECTIF`…), parce que des colonnes homonymes existent déjà côté salariés. La base
-analytique conserve donc les valeurs individuelles brutes, non propagées.
+La valeur déclarée sur la ligne individuelle fait foi : elle n'est **jamais écrasée**, même si
+elle diffère de la modalité retenue au niveau entreprise-mois. Quand cette valeur est nulle, elle
+est complétée par l'attribut entreprise *as-of*, donc par la dernière information connue au mois
+considéré, sans rétropropagation d'une observation future.
 
-La conséquence est limitée — les mois sans aucune ligne salarié n'existent pas dans cette base —
-mais sur une ligne où l'attribut individuel est nul alors que la valeur entreprise est connue,
-la ventilation de l'étape 10 classe en « non renseigné » au lieu d'utiliser la valeur
-entreprise. Le travail du lot C.2 est ainsi partiellement inutilisé en aval.
-
-Ce n'est pas un défaut mais un choix : quelle valeur doit porter la ventilation publiée. Non
-tranché dans ce lot.
+Ce choix conserve l'information effectivement déclarée pour le salarié tout en rendant utile le
+travail temporel du lot C.2 dans les ventilations publiées. Les autres colonnes homonymes restent
+exclues de la jointure. Les drapeaux `JAMAIS_OBSERVE_AVANT_*` sont joints pour distinguer un trou
+qui subsiste faute d'information passée. En amont, une divergence entre salariés d'une même
+entreprise-mois est désormais résolue de façon reproductible par la modalité la plus fréquente,
+puis par ordre lexicographique en cas d'égalité.

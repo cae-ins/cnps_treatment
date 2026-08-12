@@ -18,7 +18,74 @@ import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig, load_config
+from cnps.firm_panel import ASOF_ATTRIBUTES
 from cnps.storage import object_exists, read_parquet, write_parquet
+
+
+def _joindre_attributs_entreprise(indiv: pl.DataFrame, firm: pl.DataFrame) -> pl.DataFrame:
+    """
+    Complete les individus avec les attributs entreprise disponibles a date.
+
+    La valeur individuelle reste prioritaire. La valeur entreprise ne sert
+    qu'a completer une valeur nulle d'un attribut as-of homonyme.
+
+    Parameters
+    ----------
+    indiv : pl.DataFrame
+        Base au niveau individu-periode.
+    firm : pl.DataFrame
+        Base au niveau entreprise-periode.
+
+    Returns
+    -------
+    pl.DataFrame
+        Base individuelle enrichie sans changement de cardinalite.
+    """
+    indiv_cols = set(indiv.columns)
+    firm_join_cols = ["ID_EMPLOYEUR", "PERIOD"]
+    shared_asof_cols = [
+        c for c in ASOF_ATTRIBUTES if c in indiv_cols and c in firm.columns
+    ]
+
+    # Les autres homonymes restent exclus: leur arbitrage n'appartient pas a
+    # ce lot et les joindre creerait silencieusement des colonnes concurrentes.
+    firm_value_cols = [
+        c
+        for c in firm.columns
+        if c not in indiv_cols or c in firm_join_cols or c in shared_asof_cols
+    ]
+    firm_subset = firm.select(firm_value_cols)
+
+    join_on = [c for c in firm_join_cols if c in indiv.columns and c in firm_subset.columns]
+    if join_on != firm_join_cols:
+        missing = sorted(set(firm_join_cols) - set(join_on))
+        raise ValueError(
+            f"Impossible de construire la base analytique : cles de jointure absentes {missing}."
+        )
+
+    duplicate_firms = firm_subset.group_by(join_on).len().filter(pl.col("len") > 1).height
+    if duplicate_firms:
+        raise ValueError(
+            "La base entreprise n'est pas unique sur "
+            f"{join_on} : {duplicate_firms} cles dupliquees."
+        )
+
+    analytical = indiv.join(firm_subset, on=join_on, how="left", suffix="_FIRM")
+    if shared_asof_cols:
+        analytical = analytical.with_columns(
+            [
+                pl.coalesce([pl.col(attr), pl.col(f"{attr}_FIRM")]).alias(attr)
+                for attr in shared_asof_cols
+            ]
+        ).drop([f"{attr}_FIRM" for attr in shared_asof_cols])
+
+    if analytical.height != indiv.height:
+        raise AssertionError(
+            "Invariant de cardinalite viole pendant la jointure analytique : "
+            f"{indiv.height} -> {analytical.height}."
+        )
+
+    return analytical
 
 
 def construire_base_analytique(cfg: PipelineConfig) -> str:
@@ -50,39 +117,21 @@ def construire_base_analytique(cfg: PipelineConfig) -> str:
         "Fusion individus ({} lignes) avec entreprises ({} lignes)", indiv.height, firm.height
     )
 
-    # Selectionne les colonnes entreprise a joindre (evite les doublons)
-    indiv_cols = set(indiv.columns)
     firm_join_cols = ["ID_EMPLOYEUR", "PERIOD"]
-    firm_value_cols = [c for c in firm.columns if c not in indiv_cols or c in firm_join_cols]
-
-    firm_subset = firm.select([c for c in firm_value_cols if c in firm.columns])
-
-    join_on = [c for c in firm_join_cols if c in indiv.columns and c in firm_subset.columns]
-    if join_on != firm_join_cols:
-        missing = sorted(set(firm_join_cols) - set(join_on))
-        raise ValueError(
-            f"Impossible de construire la base analytique : cles de jointure absentes {missing}."
-        )
-
-    duplicate_firms = firm_subset.group_by(join_on).len().filter(pl.col("len") > 1).height
-    if duplicate_firms:
-        raise ValueError(
-            "La base entreprise n'est pas unique sur "
-            f"{join_on} : {duplicate_firms} cles dupliquees."
-        )
-
-    analytical = indiv.join(firm_subset, on=join_on, how="left")
-    # firm_value_cols porte aussi les deux cles de jointure, deja presentes cote
-    # individus: les compter surestimerait de 2 le nombre de colonnes ajoutees.
+    analytical = _joindre_attributs_entreprise(indiv, firm)
     logger.info(
         "Jointure sur {} : {} colonnes entreprise ajoutees",
-        join_on,
+        firm_join_cols,
         analytical.width - indiv.width,
     )
-    if analytical.height != indiv.height:
-        raise AssertionError(
-            "Invariant de cardinalite viole pendant la jointure analytique : "
-            f"{indiv.height} -> {analytical.height}."
+    for attr in ASOF_ATTRIBUTES:
+        if attr not in indiv.columns or attr not in firm.columns:
+            continue
+        n_completed = indiv[attr].null_count() - analytical[attr].null_count()
+        logger.info(
+            "Attribut as-of {} : {} valeurs individuelles nulles completees",
+            attr,
+            n_completed,
         )
 
     # W_JT et W_FINAL ne sont pas initialises ici. L'etape 09 joint les

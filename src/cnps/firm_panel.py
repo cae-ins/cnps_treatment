@@ -11,12 +11,17 @@ from loguru import logger
 from cnps.config import PipelineConfig
 from cnps.temporal import completed_months_expr, completed_years_expr
 
-_ASOF_ATTRIBUTES = (
+ASOF_SOURCE_ATTRIBUTES = (
     "DATE_IMMAT_EMPLOYEUR",
     "SECTEUR_ACTIVITE",
     "COMMUNE",
     "CLASSE_EFFECTIF",
     "CLASSE_EFFECTIF_REDUITE",
+)
+ASOF_ATTRIBUTES = ASOF_SOURCE_ATTRIBUTES + (
+    "CL_AGE_ENTREPRISE",
+    "AGE_ENTREPRISE_MOIS",
+    "AGE_ENTREPRISE_IMMAT",
 )
 
 
@@ -208,7 +213,7 @@ def construire_panel_risque(
         .cast(pl.Int8)
         .alias("PREMIER_MOIS_RISQUE")
     )
-    for attr in _ASOF_ATTRIBUTES:
+    for attr in ASOF_SOURCE_ATTRIBUTES:
         if attr not in panel.columns:
             continue
         panel = panel.with_columns(

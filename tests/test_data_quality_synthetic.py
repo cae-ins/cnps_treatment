@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CFG = load_config(ROOT / "config/settings.yaml", ROOT / "config/dimensions.yaml")
 harmonisation = importlib.import_module("cnps.02_harmonisation_types")
 cleaning = importlib.import_module("cnps.03_nettoyage_donnees")
+firm_base = importlib.import_module("cnps.05_base_entreprises")
 analytical_base = importlib.import_module("cnps.06_base_analytique")
 individual_model = importlib.import_module("cnps.07b_modele_declaration_indiv")
 firm_panel = importlib.import_module("cnps.firm_panel")
@@ -296,3 +297,90 @@ def test_analytical_join_preserves_individual_cardinality(monkeypatch) -> None:
     analytical_base.construire_base_analytique(CFG)
     assert captured["frame"].height == individual.height
     assert captured["frame"]["D_JT"].to_list() == [1, 1]
+
+
+def test_asof_join_completes_nulls_without_overwriting_individual_values() -> None:
+    individual = pl.DataFrame(
+        {
+            "ID_INDIV": ["I", "I"],
+            "ID_EMPLOYEUR": ["E", "E"],
+            "PERIOD": ["2024-01", "2024-02"],
+            "SECTEUR_ACTIVITE": ["Industrie", None],
+            "SALAIRE_BRUT": [100_000.0, 110_000.0],
+        }
+    )
+    firm = pl.DataFrame(
+        {
+            "ID_EMPLOYEUR": ["E", "E"],
+            "PERIOD": ["2024-01", "2024-02"],
+            "SECTEUR_ACTIVITE": ["Commerce", "Commerce"],
+            "SALAIRE_BRUT": [999_000.0, 999_000.0],
+            "D_JT": [1, 1],
+        }
+    )
+
+    result = analytical_base._joindre_attributs_entreprise(individual, firm).sort("PERIOD")
+
+    assert result["SECTEUR_ACTIVITE"].to_list() == ["Industrie", "Commerce"]
+    assert result["SALAIRE_BRUT"].to_list() == [100_000.0, 110_000.0]
+    assert result["D_JT"].to_list() == [1, 1]
+    assert "SECTEUR_ACTIVITE_FIRM" not in result.columns
+
+
+def test_asof_join_never_uses_future_firm_information() -> None:
+    observed = pl.DataFrame(
+        {
+            "ID_EMPLOYEUR": ["E", "E"],
+            "PERIOD": ["2024-01", "2024-03"],
+            "ANNEE": [2024, 2024],
+            "MOIS": [1, 3],
+            "EFFECTIF_DECLARE": [1, 1],
+            "SALAIRE_MOYEN": [100_000.0, 110_000.0],
+            "SECTEUR_ACTIVITE": [None, "Commerce"],
+        }
+    )
+    firm = firm_panel.construire_panel_risque(observed, CFG)
+    individual = pl.DataFrame(
+        {
+            "ID_INDIV": ["I", "I", "I"],
+            "ID_EMPLOYEUR": ["E", "E", "E"],
+            "PERIOD": ["2024-01", "2024-02", "2024-03"],
+            "SECTEUR_ACTIVITE": [None, None, None],
+        }
+    )
+
+    result = analytical_base._joindre_attributs_entreprise(individual, firm).sort("PERIOD")
+
+    assert result["SECTEUR_ACTIVITE"].to_list() == [None, None, "Commerce"]
+    assert result["JAMAIS_OBSERVE_AVANT_SECTEUR_ACTIVITE"].to_list() == [1, 1, 0]
+
+
+def test_firm_attribute_aggregation_is_independent_of_row_order(monkeypatch) -> None:
+    source = pl.DataFrame(
+        {
+            "ID_INDIV": ["I1", "I2", "I3", "I4"],
+            "ID_EMPLOYEUR": ["E"] * 4,
+            "PERIOD": ["2024-01"] * 4,
+            "ANNEE": [2024] * 4,
+            "MOIS": [1] * 4,
+            "SALAIRE_BRUT": [100_000.0] * 4,
+            "SECTEUR_ACTIVITE": ["Commerce", "Agriculture", "Commerce", "Agriculture"],
+        }
+    )
+    inputs = iter([source, source.reverse()])
+    outputs: list[pl.DataFrame] = []
+    monkeypatch.setattr(firm_base, "object_exists", lambda *_a, **_k: True)
+    monkeypatch.setattr(firm_base, "read_parquet", lambda *_a, **_k: next(inputs))
+    monkeypatch.setattr(
+        firm_base,
+        "write_parquet",
+        lambda _cfg, _bucket, _object, frame: outputs.append(frame),
+    )
+
+    firm_base.construire_base_entreprises(CFG)
+    firm_base.construire_base_entreprises(CFG)
+
+    assert [frame["SECTEUR_ACTIVITE"].item() for frame in outputs] == [
+        "Agriculture",
+        "Agriculture",
+    ]

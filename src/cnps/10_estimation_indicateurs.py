@@ -432,9 +432,9 @@ def _estimate_dimension(
 
     for group_vals, group_df in df.group_by(group_cols):
         group_label = (
-            " / ".join(str(v) for v in group_vals)
+            " / ".join("Non renseigné" if v is None else str(v) for v in group_vals)
             if isinstance(group_vals, tuple)
-            else str(group_vals)
+            else ("Non renseigné" if group_vals is None else str(group_vals))
         )
         partition_values = (
             group_vals[:-1] if isinstance(group_vals, tuple) and len(group_cols) > 1 else ()

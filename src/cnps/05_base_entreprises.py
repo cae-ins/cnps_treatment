@@ -27,7 +27,7 @@ import polars as pl
 from loguru import logger
 
 from cnps.config import PipelineConfig, load_config
-from cnps.firm_panel import construire_panel_risque
+from cnps.firm_panel import ASOF_SOURCE_ATTRIBUTES, construire_panel_risque
 from cnps.storage import object_exists, read_parquet, write_parquet
 
 
@@ -121,23 +121,34 @@ def construire_base_entreprises(cfg: PipelineConfig) -> str:
         agg_exprs.append(pl.col("ANCIENNETE_ENTREPRISE").mean().alias("ANCIENNETE_MOYENNE"))
 
     # Valeurs du mois, propagees uniquement vers les mois futurs dans le panel.
-    firm_attrs = [
-        c
-        for c in [
-            "DATE_IMMAT_EMPLOYEUR",
-            "SECTEUR_ACTIVITE",
-            "COMMUNE",
-            "CLASSE_EFFECTIF",
-            "CLASSE_EFFECTIF_REDUITE",
-        ]
-        if c in df.columns
-    ]
+    firm_attrs = [c for c in ASOF_SOURCE_ATTRIBUTES if c in df.columns]
 
+    divergence_cols = []
     for attr in firm_attrs:
-        agg_exprs.append(pl.col(attr).drop_nulls().last().alias(attr))
+        divergence_col = f"_MODALITES_DIVERGENTES_{attr}"
+        divergence_cols.append(divergence_col)
+        # Le mode stabilise l'attribut quand les lignes salarie divergent; le
+        # tri rend aussi les egalites de frequence independantes de l'ordre.
+        agg_exprs.extend(
+            [
+                pl.col(attr).drop_nulls().mode().sort().first().alias(attr),
+                (pl.col(attr).drop_nulls().n_unique() > 1).alias(divergence_col),
+            ]
+        )
     logger.info("Attributs entreprise reportes : {}", firm_attrs)
 
     firm_df = df.group_by(group_cols).agg(agg_exprs)
+    if divergence_cols:
+        n_divergent = firm_df.filter(
+            pl.any_horizontal([pl.col(c) for c in divergence_cols])
+        ).height
+        firm_df = firm_df.drop(divergence_cols)
+    else:
+        n_divergent = 0
+    logger.info(
+        "Attributs entreprise : {} entreprises-mois avec plusieurs modalites",
+        n_divergent,
+    )
     logger.info("Agrege en {} enregistrements entreprise-periode", firm_df.height)
 
     # La fin commune reste celle du panel; K definit seulement la portee.

@@ -341,6 +341,27 @@ pas être forcée. Elle est remplacée par des invariants structurels.
 **Critère d'acceptation** : aucune covariable d'un mois `t` ne dépend d'une observation postérieure
 à `t`, vérifié par test sur jeu synthétique ; l'âge de l'entreprise croît d'un mois par mois.
 
+### Lot C.3 — Propager les attributs *as-of* jusqu'à la ventilation publiée
+**Fichiers** : `05_base_entreprises.py`, `06_base_analytique.py`,
+`10_estimation_indicateurs.py`
+
+Le lot C.2 construit des attributs entreprise propres temporellement, mais l'étape 06 les écartait
+lorsqu'une colonne homonyme existait déjà côté individus. L'arbitrage validé donne toujours la
+priorité à la valeur individuelle renseignée et utilise l'attribut entreprise uniquement pour
+compléter une valeur nulle.
+
+- joindre les attributs *as-of* homonymes avec un suffixe, puis appliquer un `coalesce` où la
+  valeur individuelle est placée en premier ;
+- joindre les drapeaux `JAMAIS_OBSERVE_AVANT_*` et journaliser les compléments par attribut ;
+- agréger chaque attribut entreprise-mois par modalité la plus fréquente, avec départage
+  lexicographique, et journaliser les entreprises-mois divergentes ;
+- publier les groupes nuls sous le libellé « Non renseigné » sans les retirer du `group_by`.
+
+**Critère d'acceptation** : aucune valeur individuelle renseignée n'est modifiée, aucune
+information future ne complète un mois antérieur, la cardinalité individu reste inchangée,
+l'agrégation produit le même attribut quel que soit l'ordre des lignes, aucun libellé `"None"` ne
+subsiste dans les sorties et les décomptes de complétion et de divergence figurent dans les logs.
+
 ---
 
 ## Phase D — Modèles de réponse
