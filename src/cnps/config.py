@@ -142,6 +142,17 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True)
+class GitPublicationConfig:
+    """Publication opt-in des seuls rapports de recette dans Git."""
+
+    allowed: bool
+    remote: str
+    branch: str
+    reports_directory: Path
+    include_estimates: bool
+
+
+@dataclass(frozen=True)
 class DimensionDef:
     """A single analytical dimension (axis of analysis)."""
 
@@ -175,6 +186,7 @@ class PipelineConfig:
     minio: MinioConfig
     parallel: ParallelConfig
     logging: LoggingConfig
+    git_publication: GitPublicationConfig
     dimensions: list[DimensionDef]
     statistics: list[StatDef]
 
@@ -444,6 +456,18 @@ def load_config(
         retention=str(logging_raw["retention"]),
     )
 
+    git_raw = settings.get("git_publication", {})
+    reports_directory = Path(git_raw.get("reports_directory", "run_reports"))
+    if reports_directory.is_absolute() or ".." in reports_directory.parts:
+        raise ValueError("git_publication.reports_directory doit rester dans le depot.")
+    git_publication = GitPublicationConfig(
+        allowed=bool(git_raw.get("allowed", False)),
+        remote=str(git_raw.get("remote", "origin")),
+        branch=str(git_raw.get("branch", "")),
+        reports_directory=reports_directory,
+        include_estimates=bool(git_raw.get("include_estimates", False)),
+    )
+
     # --- Dimensions ---
     dimensions = []
     for name, d in dims_raw["dimensions"].items():
@@ -481,6 +505,7 @@ def load_config(
         minio=minio,
         parallel=parallel,
         logging=logging,
+        git_publication=git_publication,
         dimensions=dimensions,
         statistics=statistics,
     )

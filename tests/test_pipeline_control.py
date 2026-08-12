@@ -13,7 +13,25 @@ storage = importlib.import_module("cnps.storage")
 
 
 def _config() -> SimpleNamespace:
-    return SimpleNamespace(minio=SimpleNamespace(output_prefix="", output_bucket="output"))
+    return SimpleNamespace(
+        minio=SimpleNamespace(output_prefix="", output_bucket="output"),
+        modeling=SimpleNamespace(
+            estimation_method="ipw",
+            risk_window_months=12,
+            propensity_clip=1e-6,
+            ipw_trim_lower=0.01,
+            ipw_trim_upper=0.99,
+            max_trimmed_share=0.05,
+        ),
+        estimation=SimpleNamespace(
+            inference_method="point_only",
+            confidence_level=0.95,
+            min_distinct_individuals=30,
+            min_distinct_employers=3,
+            max_employer_wage_share=0.85,
+        ),
+        cleaning=SimpleNamespace(unknown_periodicity_assumption="monthly"),
+    )
 
 
 def test_estimation_is_computed_once_and_passed_to_validation_and_export(
@@ -44,7 +62,12 @@ def test_estimation_is_computed_once_and_passed_to_validation_and_export(
         pipeline.Stage.EXPORT_EXCEL: export,
     }
     monkeypatch.setattr(pipeline, "_load_stage_function", functions.__getitem__)
-    monkeypatch.setattr(storage, "write_json", lambda *_args, **_kwargs: None)
+    written: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        storage,
+        "write_json",
+        lambda _cfg, _bucket, object_name, data: written.append((object_name, data)),
+    )
 
     result = pipeline.run_pipeline(
         _config(),
@@ -54,6 +77,11 @@ def test_estimation_is_computed_once_and_passed_to_validation_and_export(
 
     assert result.success
     assert calls == {"estimate": 1, "validate": 1, "export": 1}
+    validation_artifacts = [data for name, data in written if name.endswith("validation_report.json")]
+    assert validation_artifacts[0]["technical_validation"] == "PASS"
+    assert validation_artifacts[0]["official_publication_readiness"].startswith("BLOCKED_")
+    estimation_artifacts = [data for name, data in written if name.endswith("estimation_results.json")]
+    assert estimation_artifacts[0]["rows"] == [{"dimension": "National", "mean": 100.0}]
 
 
 def test_validation_error_blocks_export(monkeypatch) -> None:

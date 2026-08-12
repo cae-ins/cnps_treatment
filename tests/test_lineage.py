@@ -32,11 +32,15 @@ def test_config_fingerprint_redacts_credentials_and_is_stable() -> None:
         total_duration_seconds=1.0,
         success=True,
         stages=[StageResult("test", "ok", 1.0, output_path="x.parquet")],
+        validation_report_path="sessions/abc/validation_report.json",
+        estimation_results_path="sessions/abc/estimation_results.json",
     )
     serialized = str(manifest)
     assert "super-secret" not in serialized
     assert "public" not in serialized
     assert manifest["stages"][0]["output_path"] == "x.parquet"
+    assert manifest["validation_report_path"] == "sessions/abc/validation_report.json"
+    assert manifest["estimation_results_path"] == "sessions/abc/estimation_results.json"
     assert len(manifest["config_sha256"]) == 64
 
 

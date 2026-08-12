@@ -67,6 +67,51 @@ class ValidationReport:
         status = "PASS" if self.is_valid else "FAIL"
         return f"[{status}] {n_err} erreurs, {n_warn} avertissements, {n_info} infos"
 
+    def to_dict(self, cfg: PipelineConfig | None = None) -> dict:
+        """Serialise la recette sans confondre validation technique et homologation."""
+        payload = {
+            "schema_version": 1,
+            "technical_validation": "PASS" if self.is_valid else "FAIL",
+            "official_publication_readiness": "BLOCKED_PENDING_F1_AND_EXTERNAL_APPROVALS",
+            "summary": {
+                "errors": len(self.errors),
+                "warnings": len(self.warnings),
+                "infos": len(self.issues) - len(self.errors) - len(self.warnings),
+            },
+            "issues": [
+                {
+                    "level": issue.level,
+                    "stage": issue.stage,
+                    "check": issue.check,
+                    "message": issue.message,
+                    "details": issue.details,
+                }
+                for issue in self.issues
+            ],
+            "external_requirements": {
+                "f1_joint_variance_validated": False,
+                "official_confidentiality_rules_approved": False,
+                "external_benchmark_reconciliation_approved": False,
+                "population_scope_approved": False,
+            },
+        }
+        if cfg is not None:
+            payload["estimation_parameters"] = {
+                "estimation_method": cfg.modeling.estimation_method,
+                "risk_window_months": cfg.modeling.risk_window_months,
+                "propensity_clip": cfg.modeling.propensity_clip,
+                "ipw_trim_lower": cfg.modeling.ipw_trim_lower,
+                "ipw_trim_upper": cfg.modeling.ipw_trim_upper,
+                "max_trimmed_share": cfg.modeling.max_trimmed_share,
+                "inference_method": cfg.estimation.inference_method,
+                "confidence_level": cfg.estimation.confidence_level,
+                "min_distinct_individuals": cfg.estimation.min_distinct_individuals,
+                "min_distinct_employers": cfg.estimation.min_distinct_employers,
+                "max_employer_wage_share": cfg.estimation.max_employer_wage_share,
+                "unknown_periodicity_assumption": cfg.cleaning.unknown_periodicity_assumption,
+            }
+        return payload
+
 
 # ---------------------------------------------------------------------------
 # 1. Validation des donnees
@@ -418,6 +463,15 @@ def valider_modeles(cfg: PipelineConfig) -> ValidationReport:
                         f"Poids entreprise : moyenne={np.mean(w):.3f}, "
                         f"mediane={np.median(w):.3f}, "
                         f"plage=[{np.min(w):.3f}, {np.max(w):.3f}]",
+                        details={
+                            "n": int(w.size),
+                            "mean": float(np.mean(w)),
+                            "median": float(np.median(w)),
+                            "std": float(np.std(w)),
+                            "cv": cv,
+                            "min": float(np.min(w)),
+                            "max": float(np.max(w)),
+                        },
                     )
                 )
         else:
@@ -469,6 +523,41 @@ def valider_modeles(cfg: PipelineConfig) -> ValidationReport:
                 else np.ones(analytical.height, dtype=bool)
             )
             response = scope & (d == 1) & (s == 1)
+            n_scope = int(scope.sum())
+            n_firm_response = int((scope & (d == 1)).sum())
+            n_full_response = int(response.sum())
+            report.issues.append(
+                ValidationIssue(
+                    "INFO",
+                    "model",
+                    "analysis_scope",
+                    f"Champ analytique: {n_scope:,}/{analytical.height:,} lignes; "
+                    f"D=1 sur {n_firm_response:,}, D*S=1 sur {n_full_response:,}.",
+                    details={
+                        "n_rows": analytical.height,
+                        "n_in_risk_scope": n_scope,
+                        "risk_scope_share": n_scope / analytical.height if analytical.height else 0.0,
+                        "n_firm_responding": n_firm_response,
+                        "firm_response_row_share_in_scope": (
+                            n_firm_response / n_scope if n_scope else 0.0
+                        ),
+                        "n_fully_responding": n_full_response,
+                        "full_response_row_share_in_scope": (
+                            n_full_response / n_scope if n_scope else 0.0
+                        ),
+                        "n_employers": (
+                            analytical["ID_EMPLOYEUR"].drop_nulls().n_unique()
+                            if "ID_EMPLOYEUR" in analytical.columns
+                            else None
+                        ),
+                        "n_periods": (
+                            analytical["PERIOD"].drop_nulls().n_unique()
+                            if "PERIOD" in analytical.columns
+                            else None
+                        ),
+                    },
+                )
+            )
             invalid_final = (
                 ~np.isfinite(w_final) | ~np.isfinite(w_raw) | (w_final < 0) | (w_raw < 0)
             )
@@ -500,6 +589,17 @@ def valider_modeles(cfg: PipelineConfig) -> ValidationReport:
                         f"moyenne={positive.mean():.3f}, mediane={np.median(positive):.3f}, "
                         f"max={positive.max():.3f}, ESS={ess:,.1f} "
                         f"({ess / positive.size:.1%}), part tronquee={trimmed_share:.2%}.",
+                        details={
+                            "n_positive": int(positive.size),
+                            "mean": float(positive.mean()),
+                            "median": float(np.median(positive)),
+                            "std": float(np.std(positive)),
+                            "min": float(positive.min()),
+                            "max": float(positive.max()),
+                            "ess": ess,
+                            "ess_share": float(ess / positive.size),
+                            "trimmed_share": trimmed_share,
+                        },
                     )
                 )
             else:

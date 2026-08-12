@@ -41,6 +41,7 @@ from rich.console import Console
 from rich.table import Table
 
 from cnps.config import load_config
+from cnps.git_publication import auto_publish_run_report
 from cnps.pipeline import Stage, run_pipeline
 
 app = typer.Typer(
@@ -142,6 +143,7 @@ def run(
     table.add_row("TOTAL", "", f"{result.total_duration_seconds:.1f}s", style="bold")
     console.print(table)
     _raise_on_pipeline_failure(result)
+    auto_publish_run_report(cfg, result.session_id)
 
 
 @app.command()

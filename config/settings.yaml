@@ -174,3 +174,14 @@ logging:
   rotation: "10 MB"
   # Retention
   retention: "30 days"
+
+# --- Publication Git des rapports de recette ---
+# Double opt-in : cette autorisation doit etre vraie ET la variable
+# CNPS_AUTO_GIT_PUSH doit valoir true/1/yes au moment du run.
+git_publication:
+  allowed: true
+  remote: "origin"
+  branch: "fix/audit-phase-b"
+  reports_directory: "run_reports"
+  # Les estimations peuvent etre sensibles et restent hors Git par defaut.
+  include_estimates: false

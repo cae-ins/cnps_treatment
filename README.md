@@ -155,6 +155,7 @@ Le manifeste est immuable par identifiant de session, mais les objets canoniques
 - `docs/plan_correction_v2.md` : arbitrages, lots et critères de recette ;
 - `docs/note_passation_v1R_vers_v2python.md` : pont historique entre la v1 R et la refonte Python ;
 - `docs/protocole_tests_dgp.md` : protocole de validation par processus générateurs ;
+- `docs/protocole_recette_jhub.md` : exécution réelle, artefacts sessionnés et sensibilités ;
 - `docs/rapport_resultats_controles_suivi_ciap.docx` : résultats de l'audit, contrôles historiques et pont CIAP/comptabilité nationale.
 
 Aucune valeur de production récente n'est embarquée dans ce dépôt. Les chiffres historiques cités dans les rapports doivent être identifiés par période, session et empreinte des entrées, puis recalculés après rétablissement de l'accès MinIO/VPN.

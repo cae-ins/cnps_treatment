@@ -200,6 +200,17 @@ def run_pipeline(
     logger.info(
         "Pipeline demarre : session={}, etapes={}->{}", session_id, from_stage.name, to_stage.name
     )
+    logger.info(
+        "Parametres de recette : methode={}, K={}, trimming=[{:.3f}, {:.3f}], "
+        "clip={:.3g}, periodicite_inconnue={}, inference={}",
+        cfg.modeling.estimation_method,
+        cfg.modeling.risk_window_months if cfg.modeling.risk_window_months is not None else "inf",
+        cfg.modeling.ipw_trim_lower,
+        cfg.modeling.ipw_trim_upper,
+        cfg.modeling.propensity_clip,
+        cfg.cleaning.unknown_periodicity_assumption,
+        cfg.estimation.inference_method,
+    )
 
     results: list[StageResult] = []
     estimation_results: Any = None
@@ -286,6 +297,42 @@ def run_pipeline(
 
     session_object = f"{cfg.minio.output_prefix}sessions/{session_id}/metadata.json"
     session_bucket = cfg.minio.output_bucket
+    validation_object: str | None = None
+    estimation_object: str | None = None
+    if estimation_results is not None:
+        estimation_object = (
+            f"{cfg.minio.output_prefix}sessions/{session_id}/estimation_results.json"
+        )
+        write_json(
+            cfg.minio,
+            session_bucket,
+            estimation_object,
+            {
+                "schema_version": 1,
+                "session_id": session_id,
+                "rows": estimation_results.to_dicts(),
+            },
+        )
+        logger.info(
+            "Estimations sessionnees : {}/{}",
+            session_bucket,
+            estimation_object,
+        )
+    if validation_report is not None:
+        validation_object = (
+            f"{cfg.minio.output_prefix}sessions/{session_id}/validation_report.json"
+        )
+        write_json(
+            cfg.minio,
+            session_bucket,
+            validation_object,
+            validation_report.to_dict(cfg),
+        )
+        logger.info(
+            "Rapport de recette structure : {}/{}",
+            session_bucket,
+            validation_object,
+        )
     meta = build_session_manifest(
         cfg,
         session_id=session_id,
@@ -294,6 +341,8 @@ def run_pipeline(
         total_duration_seconds=dt_total,
         success=pipeline_result.success,
         stages=results,
+        validation_report_path=validation_object,
+        estimation_results_path=estimation_object,
     )
     write_json(cfg.minio, session_bucket, session_object, meta)
 
