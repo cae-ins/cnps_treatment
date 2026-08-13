@@ -342,7 +342,7 @@ def ajuster_modele_declaration_indiv(cfg: PipelineConfig) -> str:
     df_model, cat_feats, num_feats = _prepare_features(declarantes)
     y = df_model["S_IJT"].to_numpy().astype(float)
 
-    reject_never_responding_strata(
+    positivity_diagnostics = reject_never_responding_strata(
         df_model,
         target="S_IJT",
         categorical_features=cat_feats,
@@ -477,6 +477,7 @@ def ajuster_modele_declaration_indiv(cfg: PipelineConfig) -> str:
             "schema_version": 1,
             "model_type": "logistic_regression_l2",
             "diagnostics_oof": diagnostics.__dict__,
+            "positivity_diagnostics": positivity_diagnostics,
             "features_raw": cat_feats + num_feats,
             "features_encoded": preprocessor.get_feature_names_out().tolist(),
             "coefficients": classifier.coef_.tolist(),

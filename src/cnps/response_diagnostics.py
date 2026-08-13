@@ -266,12 +266,40 @@ def reject_never_responding_strata(
     categorical_features: list[str],
     min_size: int,
     label: str,
-) -> None:
-    """Refuse les strates categorielles assez grandes sans aucun repondant."""
+) -> dict[str, object]:
+    """Refuse les modalites non identifiables et decrit les croisements creux.
+
+    Les modeles de reponse actuels sont additifs : chaque modalite categorielle
+    recoit un coefficient, mais aucune interaction complete entre toutes les
+    covariables n'est estimee. Une cellule vide du produit cartesien ne prouve
+    donc pas, a elle seule, une violation structurelle du modele ajuste.
+    """
     features = [name for name in categorical_features if name in df.columns]
     if not features:
-        return
-    strata = (
+        return {"marginal_violations": 0, "joint_zero_response_cells": 0}
+
+    marginal_violations: list[dict[str, object]] = []
+    for feature in features:
+        levels = (
+            df.group_by(feature)
+            .agg(
+                pl.len().alias("_N"),
+                pl.col(target).sum().alias("_REPONSES"),
+            )
+            .filter((pl.col("_N") >= min_size) & (pl.col("_REPONSES") == 0))
+        )
+        marginal_violations.extend(
+            {"feature": feature, **row} for row in levels.to_dicts()
+        )
+
+    if marginal_violations:
+        raise ValueError(
+            f"Violation structurelle de positivite pour {label}: "
+            f"{len(marginal_violations)} modalite(s) marginale(s) sans repondant, "
+            f"exemples={marginal_violations[:5]}."
+        )
+
+    joint_cells = (
         df.group_by(features)
         .agg(
             pl.len().alias("_N"),
@@ -279,10 +307,17 @@ def reject_never_responding_strata(
         )
         .filter((pl.col("_N") >= min_size) & (pl.col("_REPONSES") == 0))
     )
-    if strata.height == 0:
-        return
-    examples = strata.head(5).to_dicts()
-    raise ValueError(
-        f"Violation structurelle de positivite pour {label}: "
-        f"{strata.height} strate(s) sans repondant, exemples={examples}."
-    )
+    if joint_cells.height:
+        logger.warning(
+            "{} : {} combinaison(s) complete(s) sans repondant sur au moins {} lignes; "
+            "diagnostic non bloquant car aucune interaction complete n'est ajustee. Exemples={}",
+            label,
+            joint_cells.height,
+            min_size,
+            joint_cells.head(5).to_dicts(),
+        )
+    return {
+        "marginal_violations": 0,
+        "joint_zero_response_cells": joint_cells.height,
+        "joint_examples": joint_cells.head(5).to_dicts(),
+    }

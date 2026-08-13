@@ -200,6 +200,11 @@ les limites d'identification et, après implémentation de F.1, la couverture.
 
 Les vérifications sur valeurs réelles, les sensibilités `K` et la comparaison CIAP/comptabilité nationale nécessitent les entrées MinIO et ne sont pas revendiquées dans cette version hors VPN.
 
+Le diagnostic de positivité des modèles additifs bloque lorsqu'une modalité marginale d'une
+covariable effectivement encodée ne contient aucun répondant au-delà du seuil configuré. Les
+croisements complets entre toutes les covariables sont également dénombrés et journalisés, mais
+ne sont pas bloquants tant que ces interactions ne figurent pas dans la spécification du modèle.
+
 Les limites méthodologiques ouvertes sont :
 
 1. variance F.1 et validation de couverture ;

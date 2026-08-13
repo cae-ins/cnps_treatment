@@ -157,7 +157,7 @@ def ajuster_modele_declaration(cfg: PipelineConfig) -> str:
 
     y = df_model["D_JT"].to_numpy().astype(float)
 
-    reject_never_responding_strata(
+    positivity_diagnostics = reject_never_responding_strata(
         df_model,
         target="D_JT",
         categorical_features=cat_feats,
@@ -287,6 +287,7 @@ def ajuster_modele_declaration(cfg: PipelineConfig) -> str:
             "schema_version": 1,
             "model_type": "logistic_regression_l2",
             "diagnostics_oof": diagnostics.__dict__,
+            "positivity_diagnostics": positivity_diagnostics,
             "features_raw": cat_feats + num_feats,
             "features_encoded": preprocessor.get_feature_names_out().tolist(),
             "coefficients": classifier.coef_.tolist(),
