@@ -116,6 +116,7 @@ def build_session_manifest(
     stages: list[Any],
     validation_report_path: str | None = None,
     estimation_results_path: str | None = None,
+    run_report_path: str | None = None,
 ) -> dict[str, Any]:
     """Construit le manifeste de session et la chaine de sorties declarees."""
     project_root = Path(getattr(getattr(cfg, "paths", None), "project_root", Path.cwd())).resolve()
@@ -149,6 +150,7 @@ def build_session_manifest(
         "stages": stage_rows,
         "validation_report_path": validation_report_path,
         "estimation_results_path": estimation_results_path,
+        "run_report_path": run_report_path,
         "artifact_contract": {
             "manifest_namespace_is_session_scoped": True,
             "canonical_stage_outputs_are_mutable": True,

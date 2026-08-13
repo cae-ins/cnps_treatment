@@ -142,8 +142,14 @@ def run(
 
     table.add_row("TOTAL", "", f"{result.total_duration_seconds:.1f}s", style="bold")
     console.print(table)
+    try:
+        auto_publish_run_report(cfg, result.session_id)
+    except Exception as exc:
+        # La publication Git est un canal de collecte, pas une etape statistique.
+        # Son echec ne doit ni masquer le code retour du pipeline ni transformer
+        # un calcul valide en echec methodologique.
+        logger.exception("Auto-publication Git echouee: {}", exc)
     _raise_on_pipeline_failure(result)
-    auto_publish_run_report(cfg, result.session_id)
 
 
 @app.command()

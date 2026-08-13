@@ -32,7 +32,7 @@ def auto_publish_run_report(cfg: PipelineConfig, session_id: str) -> bool:
         "true",
         "yes",
     }
-    if not cfg.git_publication.allowed or not enabled:
+    if not enabled or not cfg.git_publication.allowed:
         logger.info("Auto-publication Git inactive (double opt-in non active).")
         return False
 
@@ -50,15 +50,13 @@ def auto_publish_run_report(cfg: PipelineConfig, session_id: str) -> bool:
     prefix = f"{cfg.minio.output_prefix}sessions/{session_id}"
     metadata_path = f"{prefix}/metadata.json"
     metadata = read_json(cfg.minio, cfg.minio.output_bucket, metadata_path)
+    run_report_path = metadata.get("run_report_path")
+    if not run_report_path:
+        raise RuntimeError("Rapport d'execution absent du manifeste de session.")
+    artifacts = {"metadata.json": metadata_path, "run_report.json": run_report_path}
     validation_path = metadata.get("validation_report_path")
-    if not validation_path:
-        logger.warning(
-            "Auto-publication ignoree: la session {} ne contient pas de validation complete.",
-            session_id,
-        )
-        return False
-
-    artifacts = {"metadata.json": metadata_path, "validation_report.json": validation_path}
+    if validation_path:
+        artifacts["validation_report.json"] = validation_path
     estimation_path = metadata.get("estimation_results_path")
     if cfg.git_publication.include_estimates:
         if not estimation_path:
@@ -92,7 +90,7 @@ def auto_publish_run_report(cfg: PipelineConfig, session_id: str) -> bool:
     _git(root, "commit", "-m", f"chore: ajoute la recette CNPS {session_id}")
     _git(root, "push", cfg.git_publication.remote, current_branch)
     logger.info(
-        "Rapports de recette commités et poussés sur {}/{} : {}",
+        "Rapports d'execution commités et poussés sur {}/{} : {}",
         cfg.git_publication.remote,
         current_branch,
         relative_target,

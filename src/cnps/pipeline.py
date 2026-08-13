@@ -297,6 +297,7 @@ def run_pipeline(
 
     session_object = f"{cfg.minio.output_prefix}sessions/{session_id}/metadata.json"
     session_bucket = cfg.minio.output_bucket
+    run_report_object = f"{cfg.minio.output_prefix}sessions/{session_id}/run_report.json"
     validation_object: str | None = None
     estimation_object: str | None = None
     if estimation_results is not None:
@@ -343,7 +344,45 @@ def run_pipeline(
         stages=results,
         validation_report_path=validation_object,
         estimation_results_path=estimation_object,
+        run_report_path=run_report_object,
     )
+    write_json(
+        cfg.minio,
+        session_bucket,
+        run_report_object,
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "run_status": "SUCCESS" if pipeline_result.success else "FAILURE",
+            "start_time": start_time,
+            "end_time": end_time,
+            "total_duration_seconds": dt_total,
+            "failed_stage": next(
+                (stage.stage for stage in results if stage.status == "error"),
+                None,
+            ),
+            "error": next(
+                (stage.error for stage in results if stage.status == "error"),
+                None,
+            ),
+            "stages": meta["stages"],
+            "config_sha256": meta["config_sha256"],
+            "git": meta["git"],
+            "dependencies": meta["dependencies"],
+            "parameters": {
+                "estimation_method": cfg.modeling.estimation_method,
+                "risk_window_months": cfg.modeling.risk_window_months,
+                "propensity_clip": cfg.modeling.propensity_clip,
+                "ipw_trim_lower": cfg.modeling.ipw_trim_lower,
+                "ipw_trim_upper": cfg.modeling.ipw_trim_upper,
+                "unknown_periodicity_assumption": cfg.cleaning.unknown_periodicity_assumption,
+                "inference_method": cfg.estimation.inference_method,
+            },
+            "validation_report_path": validation_object,
+            "estimation_results_path": estimation_object,
+        },
+    )
+    logger.info("Rapport d'execution : {}/{}", session_bucket, run_report_object)
     write_json(cfg.minio, session_bucket, session_object, meta)
 
     status = "SUCCES" if pipeline_result.success else "ECHEC"

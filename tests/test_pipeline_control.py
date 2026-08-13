@@ -82,6 +82,8 @@ def test_estimation_is_computed_once_and_passed_to_validation_and_export(
     assert validation_artifacts[0]["official_publication_readiness"].startswith("BLOCKED_")
     estimation_artifacts = [data for name, data in written if name.endswith("estimation_results.json")]
     assert estimation_artifacts[0]["rows"] == [{"dimension": "National", "mean": 100.0}]
+    run_artifacts = [data for name, data in written if name.endswith("run_report.json")]
+    assert run_artifacts[0]["run_status"] == "SUCCESS"
 
 
 def test_validation_error_blocks_export(monkeypatch) -> None:

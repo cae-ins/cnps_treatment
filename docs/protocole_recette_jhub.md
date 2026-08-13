@@ -31,7 +31,9 @@ python run.py run 2>&1 | tee run_k12.log
 ```
 
 L'auto-publication refuse un dépôt déjà modifié, une autre branche que celle autorisée dans
-`git_publication.branch`, un run sans validation complète ou un artefact extérieur à la session.
+`git_publication.branch` ou un artefact extérieur à la session. Le `run_report.json` est publié
+quel que soit le succès du pipeline ; `validation_report.json` n'est ajouté que si l'étape 11 a
+été atteinte.
 Par défaut, les estimations ne sont pas ajoutées à Git (`include_estimates: false`).
 
 La première ligne du pipeline donne le `session_id`. Le préfixe MinIO suivant contient les preuves
@@ -39,6 +41,7 @@ propres à cette exécution :
 
 ```text
 <output_prefix>/sessions/<session_id>/metadata.json
+<output_prefix>/sessions/<session_id>/run_report.json
 <output_prefix>/sessions/<session_id>/validation_report.json
 <output_prefix>/sessions/<session_id>/estimation_results.json
 ```
@@ -70,7 +73,7 @@ et relatif de la moyenne, de la médiane et du Gini, ainsi que l'ESS et la part 
 
 - les quatre `session_id` nominaux ;
 - les fichiers de log correspondants, secrets vérifiés absents ;
-- les `metadata.json` et `validation_report.json` ;
+- les `metadata.json`, `run_report.json` et, s'il existe, `validation_report.json` ;
 - les erreurs éventuelles avec leur première trace complète ;
 - les agrégats externes autorisés pour le rapprochement, accompagnés de leur millésime et de leur
   définition de champ.
